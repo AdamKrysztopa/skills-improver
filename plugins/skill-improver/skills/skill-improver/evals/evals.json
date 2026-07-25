@@ -1,0 +1,54 @@
+{
+  "skill_name": "skill-improver",
+  "evals": [
+    {
+      "id": 0,
+      "name": "scan-updates",
+      "prompt": "Can you check if any of my globally installed Claude Code skills or plugins are out of date? I want to know what has updates available.",
+      "expected_output": "A categorized report of installed plugins AND standalone skills showing which have newer versions available at their source (compared against fetched remote latest), which are current, and which can't be determined; read-only; points the user to /plugin and the skills installer to apply updates.",
+      "files": [],
+      "assertions": [
+        "Enumerates real installed plugins by name",
+        "Compares against source's latest (fetched), not a stale local copy; no false positives on current plugins",
+        "Correctly flags genuinely out-of-date plugins as having updates",
+        "Covers standalone skills tracked in ~/.agents/.skill-lock.json: clones their source repos, diffs installed folders, and reports skill updates and removed-upstream skills",
+        "Does not report a false update when an installed record's version is current but its recorded sha is stale (resolves the installed version against upstream tags / the manifest pin instead of trusting the recorded sha blindly)",
+        "Separates results into actionable categories",
+        "Read-only: modifies nothing",
+        "Tells the user how to apply updates (/plugin for plugins, the skills installer for standalone skills)"
+      ]
+    },
+    {
+      "id": 1,
+      "name": "standard-improve-research",
+      "prompt": "My installed 'research' skill feels dated. Give it a standard cleanup pass to improve its structure and quality.",
+      "expected_output": "An improved COPY of the research skill plus a proposal explaining each change; description rewritten for triggering; structural/progressive-disclosure improvements; identity preserved; live skill untouched.",
+      "files": [],
+      "assertions": [
+        "Delivers an improved copy; does not edit the live skill in place",
+        "Rewrites description for triggering with concrete when-to-use situations",
+        "Preserves skill name and core purpose",
+        "Applies a structural / progressive-disclosure improvement, not just cosmetics",
+        "Every file referenced from the improved SKILL.md actually exists in the copy and is wired to it (no dangling references)",
+        "Proposal explains reasoning per change tied to a found weakness"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "deep-improve-deck-builder",
+      "prompt": "Make my 'deck-builder' skill best-in-class. Really research it — web, current docs, comparable skills — and bring it up to the state of the art.",
+      "expected_output": "An improved COPY of deck-builder plus a research-backed proposal citing web/Context7/skills-market/GitHub findings, translating them into concrete edits; verifies tool currency (pandoc/PPTX); marks research provenance when live fetching is degraded; identity preserved; live skill untouched.",
+      "files": [],
+      "assertions": [
+        "Delivers an improved copy; does not edit the live skill in place",
+        "Performs external research across at least two distinct channels (web search, Context7 docs, skills marketplace, GitHub) with named sources and concrete cited findings",
+        "Verifies currency of dependencies (pandoc / PPTX behaviour)",
+        "Translates findings into concrete edits, not a link list",
+        "Applied code changes compile/parse, and the proposal's claimed change set matches the actual diff against the original (no phantom or unreported edits)",
+        "Research findings are marked with provenance: which were fetched live this run vs recalled from prior knowledge, explicitly declaring any research track whose tools were unavailable or blocked",
+        "Proposal justifies each change with reasoning/source",
+        "Preserves skill identity and core purpose"
+      ]
+    }
+  ]
+}

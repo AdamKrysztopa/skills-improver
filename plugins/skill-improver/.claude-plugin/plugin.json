@@ -1,0 +1,10 @@
+{
+  "name": "skill-improver",
+  "version": "1.0.0",
+  "description": "Audit installed skills and plugins for source updates, and improve existing skills — standard cleanup or a deep, research-backed state-of-the-art pass.",
+  "author": {
+    "name": "AdamKrysztopa"
+  },
+  "homepage": "https://github.com/AdamKrysztopa/skills-improver",
+  "license": "MIT"
+}

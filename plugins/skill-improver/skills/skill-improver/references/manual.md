@@ -23,8 +23,29 @@ Just ask in plain language — the skill triggers on phrasing, not commands:
 - "improve my research skill" / "give X a cleanup" → **standard pass**
 - "make deck-builder best-in-class" / "really research X" → **deep pass**
 
-If you installed the command wrappers, `/skill-improver:upgrade` and
-`/skill-improver:improve` do the same things explicitly.
+Explicit commands work too: `/skill-improver:upgrade` and
+`/skill-improver:improve <name>`.
+
+### Installing / uninstalling
+
+As a plugin (recommended — wires up the skill and both commands):
+
+```text
+/plugin marketplace add AdamKrysztopa/skills-improver
+/plugin install skill-improver@skills-improver
+```
+
+Standalone (no plugin machinery — symlink so edits go live immediately):
+
+```bash
+ln -s "<repo>/plugins/skill-improver/skills/skill-improver" ~/.claude/skills/skill-improver
+mkdir -p ~/.claude/commands/skill-improver
+ln -s "<repo>/plugins/skill-improver/commands/"*.md ~/.claude/commands/skill-improver/
+```
+
+Either way, start a new session afterwards — skills and commands register at
+session start. Uninstall: `/plugin uninstall skill-improver@skills-improver`,
+or delete the symlinks.
 
 You can also run the scanner yourself, straight from the terminal:
 
@@ -100,7 +121,7 @@ facts.
 ### What you get
 
 Both passes deliver the same two things, in a workspace folder
-(`skill-improver-workspace/<name>-improved/` or the eval outputs dir):
+(`~/.claude/skill-improver-workspace/<name>-improved/`):
 
 1. **The improved copy** — a full, self-contained copy of the skill with the
    changes applied. Your live installed skill is never edited in place

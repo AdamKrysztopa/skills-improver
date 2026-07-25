@@ -26,6 +26,12 @@ skill references any library, framework, SDK, CLI, or cloud service:
 - Verify every API call, flag, config key, and command the skill instructs the
   model to use still exists and behaves as described.
 - Prefer this over web search for anything doc-shaped — it's current and precise.
+- **If the target skill teaches anything about the skill/plugin format itself**
+  (frontmatter fields, packaging, commands, marketplaces), the canonical
+  authorities are `agentskills.io/specification`, Anthropic's skills
+  best-practices page, and the official validator's rules in
+  `anthropics/skills` (`skill-creator/scripts/quick_validate.py`) — check all
+  three; docs sometimes lead the validator (e.g. `when_to_use`).
 
 ## Track C — Skills marketplace / prior art in skills
 

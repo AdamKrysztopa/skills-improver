@@ -1,19 +1,13 @@
 ---
 name: skill-improver
 description: >-
-  Audit and upgrade the user's globally installed Claude Code skills and plugins.
-  Two jobs: (1) SCAN — crawl every installed plugin/skill and report which ones
-  have newer versions available at their source (GitHub marketplaces), so nothing
-  silently goes stale; (2) IMPROVE — take one existing skill and make it better,
-  either a standard pass (tighten structure, prompt quality, triggering, bundle
-  repeated logic) or a deep pass that researches the web, Context7 docs, the
-  skills marketplace, and GitHub to bring it up to the current state of the art.
-  Use this whenever the user wants to check their skills/plugins for updates,
-  "upgrade my skills", audit installed skills, modernize or improve a specific
-  skill, make a skill SOTA/best-in-class, refactor a skill's structure, or fix a
-  skill that under-triggers or feels dated — even if they don't say "skill-improver"
-  or name the exact skill. Changes to a skill are always proposed for confirmation
-  before anything is written.
+  Check installed Claude Code skills and plugins for updates, and improve
+  existing skills. Use whenever the user wants to "upgrade my skills", check
+  skills or plugins for updates, find what's out of date or was removed
+  upstream, audit their installed skills, modernize or clean up a dated skill,
+  fix a skill that under-triggers, or make a skill SOTA / best-in-class with a
+  deep research pass (web, Context7 docs, skills marketplace, GitHub) — even
+  when they don't say "skill-improver" or name the exact skill.
 ---
 
 # Skill Improver
@@ -87,6 +81,11 @@ Lead with what's actionable. Report, in this order:
 4. **Up to date** — a short reassuring line, not a wall of green. Items marked
    `ok*` are fine; the footnote just explains a stale recorded sha.
 
+> ❌ **Bad:** "3 plugins have updates; everything else looks fine." — the 5
+> skills deleted from their source repo vanished from the report.
+> ✅ **Good:** "3 plugin updates, and a decision for you: `diagnose`, `to-prd`
+> and 3 more were deleted upstream — keep the local copies or remove them?"
+
 ### Step 3 — Offer to act
 
 Updating is a native operation, not something this skill does by editing files.
@@ -111,22 +110,27 @@ say "deep", "SOTA", "best-in-class", "research it", or similar).
 
 ### Step 1 — Locate the skill and secure a writable copy
 
-Resolve the skill name to a directory. It's usually one of:
-
-- `~/.claude/skills/<name>/` (may be a symlink into `~/.agents/skills/…`)
-- `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/skills/<name>/`
-
-**Never edit a plugin-cache skill in place.** That directory is replaced whole
-on the next plugin update, so any edit there is silently temporary — a trap.
-Copy the skill to a writable workspace first:
+Where the skill lives decides how you may edit it, and the probe is the same
+every time — so a bundled script does it:
 
 ```bash
-cp -r "<resolved-skill-path>" /Users/adamkrysztopa/projects/skills_improver/skill-improver-workspace/<name>-improved/
+python3 <skill-dir>/scripts/resolve_skill.py <name>
 ```
 
-Editing the user's *own* skills (their `~/.agents/skills` git repo, or a
-standalone folder they authored) in place is fine — but still show the diff and
-get confirmation before writing, per the user's stated preference.
+It prints the skill's real path (following symlinks) and classifies its home:
+
+- **`plugin-cache`** — *never edit in place.* That directory is replaced whole
+  on the next plugin update, so any edit there is silently temporary — a trap.
+  Copy the skill to a writable workspace first:
+  ```bash
+  cp -r "<resolved-skill-path>" ~/.claude/skill-improver-workspace/<name>-improved/
+  ```
+- **`agents-standalone`** — installed via the skills CLI (`npx skills add`),
+  which also overwrites on update. Improve a copy; durable homes are an
+  upstream PR or a fork.
+- **`own-standalone`** — the user's own directory (their git repo, or the
+  project behind a symlink). Editing in place is fine — but still show the
+  diff and get confirmation before writing, per the user's stated preference.
 
 ### Step 2 — Read the whole skill, then diagnose
 
@@ -172,6 +176,12 @@ reasoning is what lets them trust it). Then wait for approval before writing
 anything. This is the user's explicit preference and it matters most here,
 because these are their real tools.
 
+> ❌ **Bad:** edit `~/.claude/plugins/cache/<mkt>/<plugin>/<ver>/skills/foo/
+> SKILL.md` directly to "save a step" — the next plugin update silently
+> discards it.
+> ✅ **Good:** copy to the workspace → improve → propose → the user picks a
+> durable home (their repo, an upstream PR, or a local shadow skill).
+
 ### Step 5 — Make it stick
 
 After the user approves, explain how the improvement actually persists — this is
@@ -188,11 +198,27 @@ easy to get wrong:
 
 ---
 
-## Packaging as commands (optional)
+## Installing & packaging
 
-The user may want to invoke these as `/skill-improver:upgrade` and
-`/skill-improver:improve`. Thin command wrappers that point at this skill live in
-`commands/`. To ship as a plugin, place this skill under a plugin's `skills/` and
-the command files under the plugin's `commands/`; each command just tells Claude
-to load this skill and run the relevant workflow. The skill is the source of
-truth — keep the command files thin so behavior lives in one place.
+This skill ships as the `skill-improver` plugin in the
+`AdamKrysztopa/skills-improver` marketplace — installable via:
+
+```text
+/plugin marketplace add AdamKrysztopa/skills-improver
+/plugin install skill-improver@skills-improver
+```
+
+That wires up the skill plus the `/skill-improver:upgrade` and
+`/skill-improver:improve` command wrappers (thin files at the plugin's
+`commands/` root — each just says to load this skill and run one workflow, so
+behavior stays in one place).
+
+A standalone install works too (no plugin machinery): symlink this skill into
+`~/.claude/skills/skill-improver` and the wrappers into
+`~/.claude/commands/skill-improver/` — a subdirectory of `commands/` is what
+creates the `/skill-improver:` namespace. Symlinks are officially supported,
+so edits in the source repo go live immediately. Uninstall is the reverse:
+remove those symlinks, or `/plugin uninstall skill-improver@skills-improver`.
+
+Exact commands for both paths are in the repo `README.md`; the human-facing
+guide is `references/manual.md`.

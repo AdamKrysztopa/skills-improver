@@ -12,5 +12,7 @@ Confirm the depth first:
   the skills marketplace, and GitHub to bring the skill to the state of the art.
   Use this depth if the user said "deep", "SOTA", "best-in-class", or "research it".
 
-Always work on a writable copy (never edit a plugin cache in place), propose the
-changes for confirmation, and explain how to make the improvement persist.
+Never edit a plugin-cache skill in place (it's overwritten on plugin updates) —
+improve a copy. The user's *own* skills (own repo, standalone folder) may be
+improved in place. Either way: propose the changes for confirmation before
+writing, and explain how to make the improvement persist.

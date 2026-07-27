@@ -104,6 +104,12 @@ tighten structure, push detail into reference files, replace brittle
 ALWAYS/NEVER rules with the reasoning behind them, cut dead weight. Minutes,
 no external research.
 
+Both passes apply the Claude 5 generation's context rules: over-specified
+context now hurts these models, so restated rules and stacked emphasis get
+trimmed — words, never a decision. Stale model names, `model:` pins and
+hardcoded prices get flagged and re-verified against the live pricing page
+rather than from memory.
+
 ### Deep pass — "make X SOTA" / "really research it"
 
 Everything in the standard pass, plus a research phase across four sources:

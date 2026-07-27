@@ -32,6 +32,10 @@ skill references any library, framework, SDK, CLI, or cloud service:
   best-practices page, and the official validator's rules in
   `anthropics/skills` (`skill-creator/scripts/quick_validate.py`) — check all
   three; docs sometimes lead the validator (e.g. `when_to_use`).
+- **If the skill names a Claude model, a `model:` pin, or a price**, the
+  authority is the live pricing page (and the `claude-api` skill, if installed)
+  — see `references/claude5-context.md` §3. Re-fetch; never write a recalled
+  price into someone's skill.
 
 ## Track C — Skills marketplace / prior art in skills
 

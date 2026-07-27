@@ -5,7 +5,7 @@
   },
   "metadata": {
     "description": "Audit installed Claude Code skills/plugins for updates and improve existing skills — standard cleanup or a deep, research-backed SOTA pass.",
-    "version": "1.0.0"
+    "version": "1.1.0"
   },
   "plugins": [
     {

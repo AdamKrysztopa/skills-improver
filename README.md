@@ -16,7 +16,9 @@ Two jobs:
    first researches the current state of the art (web search, Context7 docs,
    the skills marketplace, GitHub) and grounds every edit in a cited finding.
    Research claims are marked live-fetched vs recalled, so you can trust the
-   proposal.
+   proposal. Both passes apply the Claude 5 generation's context rules — trim
+   restated rules and stacked emphasis, never a decision — and flag stale model
+   names, `model:` pins and hardcoded prices for re-verification.
 
 Changes are always proposed for your confirmation before anything is written.
 

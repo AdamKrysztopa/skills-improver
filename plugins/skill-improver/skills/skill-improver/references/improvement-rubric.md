@@ -9,6 +9,11 @@ The order matters: triggering and structure are the highest-leverage fixes.
 A brilliant skill that never triggers is worth nothing; a skill that dumps 800
 lines into context on every trigger taxes every future use.
 
+Read `references/claude5-context.md` alongside this rubric. It carries the
+Claude 5 generation's context-engineering direction (over-specified context now
+*hurts* — trim words, keep meaning) plus current model/pricing facts, and it
+feeds axes 2, 3, 4 and 6 below.
+
 **Axis 0 — should this skill exist at all?** Models improve fast; a skill that
 patched a gap in last year's model may now be dead weight the base model
 outperforms. If current Claude does the job well with no skill, say so plainly —
@@ -96,7 +101,14 @@ badly.
 - Are there instructions that only make sense for one example the author had
   in mind (an absolute path on the author's machine is the classic tell),
   that would misfire on the general case?
-- Is there redundancy — the same instruction stated three times?
+- Is there redundancy — the same instruction stated three times? Keep the
+  fuller, more actionable copy; reduce the others to their unique part.
+- Is emphasis stacked (`IMPORTANT` + `ALWAYS` + `you MUST` on one rule)?
+  Collapse to one plain statement — Claude 5 models follow it either way, and
+  the stacking only dilutes the instructions around it.
+- Beware the opposite failure: a skill that is *mostly decisions* (guardrails,
+  non-negotiables) has little to cut. Report the honest small trim instead of
+  manufacturing cuts — see `claude5-context.md` §2.
 
 ## 5. Bundled-script opportunities
 
@@ -119,6 +131,11 @@ script: written once, run reliably, no re-derivation on every invocation.
   **agentskills.io/specification** and Anthropic's skills best-practices page
   (platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices) —
   check both before asserting anything about the format itself.
+- **Model and pricing claims rot fastest.** Grep the skill for model names,
+  `model:` pins, and prices. A skill that calls Opus 4.8 "the latest", pins
+  `model: sonnet-4-6`, or hardcodes a price is wrong now — `claude5-context.md`
+  §3–4 has the current facts, the routing rules, and the instruction to
+  re-verify prices at the source before writing one into someone's skill.
 - Do bundled scripts still run? Actually execute them against a realistic
   input if feasible — a skill whose script is silently broken is worse than no
   skill.

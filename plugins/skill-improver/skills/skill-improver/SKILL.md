@@ -25,13 +25,9 @@ make improvements stick — point them at `references/manual.md`.)
 The two compose naturally: a scan often ends with "…and `research` looks dated,
 want me to improve it?" — which flows straight into Workflow 2.
 
-A grounding note on *why this skill is careful*: these are the user's own
-installed tools, and some of them (plugin-provided skills) live in a cache that
-gets **overwritten** on the next plugin update. So we never edit blindly — we
-locate the real source of truth, propose changes, and tell the user how to make
-an improvement actually stick. Losing someone's hand-tuned skill to a silent
-cache overwrite would be a genuinely bad outcome; the guardrails below exist to
-prevent it.
+These are the user's own installed tools, so nothing is edited blind: locate the
+real source of truth first, propose changes, then tell the user how to make the
+improvement stick. Steps 1, 4 and 5 of Workflow 2 carry the specifics.
 
 ---
 
@@ -129,8 +125,8 @@ It prints the skill's real path (following symlinks) and classifies its home:
   which also overwrites on update. Improve a copy; durable homes are an
   upstream PR or a fork.
 - **`own-standalone`** — the user's own directory (their git repo, or the
-  project behind a symlink). Editing in place is fine — but still show the
-  diff and get confirmation before writing, per the user's stated preference.
+  project behind a symlink). Editing in place is fine; Step 4's confirmation
+  still applies.
 
 ### Step 2 — Read the whole skill, then diagnose
 
@@ -140,8 +136,10 @@ are often in the resources, not the front page.
 
 Assess it against `references/improvement-rubric.md` — the concrete checklist
 covering description/triggering quality, progressive disclosure, prompt clarity,
-overfit/dead-weight instructions, and bundled-script opportunities. Come out of
-this step with a short written list of *specific* problems, not vibes.
+overfit/dead-weight instructions, bundled-script opportunities, and freshness
+(it pulls in `references/claude5-context.md` for the Claude 5 trim rules and
+current model/pricing facts). Come out of this step with a short written list of
+*specific* problems, not vibes.
 
 ### Step 3 — Improve
 
@@ -173,14 +171,7 @@ such — an unverified claim dressed as a citation is worse than no claim.
 Show the user a clear before/after: a diff, or a tight summary of what changed
 and *why* (tie each change back to a rubric finding or a research insight — the
 reasoning is what lets them trust it). Then wait for approval before writing
-anything. This is the user's explicit preference and it matters most here,
-because these are their real tools.
-
-> ❌ **Bad:** edit `~/.claude/plugins/cache/<mkt>/<plugin>/<ver>/skills/foo/
-> SKILL.md` directly to "save a step" — the next plugin update silently
-> discards it.
-> ✅ **Good:** copy to the workspace → improve → propose → the user picks a
-> durable home (their repo, an upstream PR, or a local shadow skill).
+anything.
 
 ### Step 5 — Make it stick
 
@@ -190,11 +181,9 @@ easy to get wrong:
 - **User's own skill** (own git repo / standalone folder): edit in place; offer
   to commit.
 - **Plugin-provided skill**: the improved copy lives in the workspace, not the
-  live cache. The durable path is to **contribute it upstream** (open a PR to the
-  source repo — you know the repo from the scan) or keep it as a **local skill**
-  under `~/.claude/skills/<name>/` that shadows the plugin version. Say plainly
-  that editing the cache directly would be undone by the next update, so they
-  choose a real home for it.
+  live cache. The durable homes are **upstream** (open a PR to the source repo —
+  you know it from the scan) or a **local skill** under `~/.claude/skills/<name>/`
+  that shadows the plugin version. Make the user pick one.
 
 ---
 

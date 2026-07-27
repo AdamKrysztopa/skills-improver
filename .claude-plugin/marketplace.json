@@ -11,6 +11,7 @@
     {
       "name": "skill-improver",
       "source": "./plugins/skill-improver",
+      "version": "1.1.0",
       "description": "Scan all globally installed skills and plugins for source updates (including standalone ~/.agents skills and removed-upstream detection), and improve existing skills via a rubric-driven standard pass or a deep research pass (web, Context7, skills marketplace, GitHub).",
       "category": "development"
     }

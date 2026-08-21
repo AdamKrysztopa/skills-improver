@@ -1,18 +1,22 @@
 ---
 name: skill-improver
 description: >-
-  Check installed Claude Code skills and plugins for updates, and improve
-  existing skills. Use whenever the user wants to "upgrade my skills", check
-  skills or plugins for updates, find what's out of date or was removed
-  upstream, audit their installed skills, modernize or clean up a dated skill,
-  fix a skill that under-triggers, or make a skill SOTA / best-in-class with a
-  deep research pass (web, Context7 docs, skills marketplace, GitHub) — even
+  Check installed Claude Code skills and plugins for updates, improve existing
+  skills, and install a self-improving lessons loop into a project. Use whenever
+  the user wants to "upgrade my skills", check skills or plugins for updates,
+  find what's out of date or was removed upstream, audit their installed skills,
+  modernize or clean up a dated skill, fix a skill that under-triggers, or make a
+  skill SOTA / best-in-class with a deep research pass (web, Context7 docs,
+  skills marketplace, GitHub). Also use when a project keeps re-learning the same
+  mistake, when someone wants its CLAUDE.md, hooks and skills to get better from
+  the mistakes made while working in it, or asks to seed / set up / bootstrap a
+  lessons-learned loop, a retro mechanism, or a lessons queue and archive — even
   when they don't say "skill-improver" or name the exact skill.
 ---
 
 # Skill Improver
 
-This skill does two related things. Figure out which one the user wants from
+This skill does three related things. Figure out which one the user wants from
 what they said, then jump to that section. If it's ambiguous, ask. (If the
 *user* wants the human-facing guide — how to read reports, apply updates, and
 make improvements stick — point them at `references/manual.md`.)
@@ -21,9 +25,14 @@ make improvements stick — point them at `references/manual.md`.)
   go to **Workflow 1: Scan for updates**.
 - **"Improve skill X" / "make X better" / "modernize X" / "make X SOTA"** →
   go to **Workflow 2: Improve a skill**.
+- **"Seed the lessons loop" / "we keep making the same mistake" / "make this
+  project learn from its own errors"** → go to **Workflow 3: Seed the
+  lessons-learned loop**.
 
-The two compose naturally: a scan often ends with "…and `research` looks dated,
-want me to improve it?" — which flows straight into Workflow 2.
+They compose naturally: a scan often ends with "…and `research` looks dated,
+want me to improve it?" — which flows straight into Workflow 2. Workflow 3 aims
+one level up: instead of improving one skill by hand, it installs the machinery
+by which a project's own tooling improves itself from the mistakes made in it.
 
 These are the user's own installed tools, so nothing is edited blind: locate the
 real source of truth first, propose changes, then tell the user how to make the
@@ -184,6 +193,73 @@ easy to get wrong:
   live cache. The durable homes are **upstream** (open a PR to the source repo —
   you know it from the scan) or a **local skill** under `~/.claude/skills/<name>/`
   that shadows the plugin version. Make the user pick one.
+
+---
+
+## Workflow 3: Seed the lessons-learned loop
+
+Goal: install into a project the machinery by which its own tooling — its
+CLAUDE.md, its hooks, its skills — gets better from the mistakes made while
+working in it, **without anyone having to remember that the machinery exists.**
+
+Read `references/lessons-loop.md` before running this. It carries the reasoning
+behind each artefact, and an install that keeps the file names and drops the
+reasoning produces something that looks right and decays within a month.
+
+### Step 1 — Confirm the form
+
+Ask which one, unless the user already said:
+
+- **`--seed`** — install with the files empty and a short worked example in each.
+- **`--seed-from-session`** — install, then populate the queue from mistakes
+  visible in *this* session's transcript. **Recommend this one.** The loop
+  arrives already carrying evidence, which is what makes the first drain worth
+  running rather than theoretical.
+- **`--dry-run`** — print what would be created and where it would wire in,
+  changing nothing.
+
+### Step 2 — Run the installer
+
+```bash
+python3 <skill-dir>/scripts/seed_lessons.py --dry-run --root <project>
+python3 <skill-dir>/scripts/seed_lessons.py --seed-from-session --root <project>
+```
+
+It detects the host's conventions (`doc/` vs `docs/`, `bin/` vs `scripts/`, an
+existing `tests/`) and retargets every path inside the scripts, skills and prose.
+
+**Exit 2 means a loop is already installed and nothing was written.** Offer
+`--upgrade`, which backs up each code file and never touches the queue or the
+archive. Don't route around it by deleting files first — a half-migrated loop
+that silently drops the archive is the worst outcome this feature can produce.
+
+The installer finishes by running the checker against a deliberately broken
+fixture, triggering the hook and printing what it injects, and running the loop's
+test suite. **Read that output and pass it on** — a hook is code, and a green
+test suite is not a working binary.
+
+### Step 3 — Populate the queue (`--seed-from-session` only)
+
+Re-read this session's transcript and write one queue entry per mistake actually
+caught in it — a documented check that was prose rather than code, a claim from
+intuition falsified by a measurement, a recommendation contradicting settled
+text, a defect found by running the software rather than by its tests.
+
+`Generalises to` is the filter: if it can't be written as a rule someone could
+follow, it's an anecdote and doesn't belong. Do **not** implement any of them —
+routing happens at the drain, where entries can be grouped.
+
+### Step 4 — Wire it into checkpoints that already fire
+
+The step that's easiest to skip and most expensive to skip. The installer prints
+the candidates it found. Add the capture skill to the project's **definition of
+done** and the drain skill to its **"decision is settled"** moment, amending an
+existing checkpoint rather than inventing a ceremony beside one that exists. In a
+project with neither, create exactly one line in CLAUDE.md's contribution
+section. Register both documents wherever the project indexes its docs.
+
+Then report against the acceptance list at the end of `references/lessons-loop.md`
+— showing the checker's and hook's real output, not asserting it.
 
 ---
 

@@ -4,15 +4,15 @@
     "name": "AdamKrysztopa"
   },
   "metadata": {
-    "description": "Audit installed Claude Code skills/plugins for updates and improve existing skills — standard cleanup or a deep, research-backed SOTA pass.",
-    "version": "1.1.0"
+    "description": "Audit installed Claude Code skills/plugins for updates, improve existing skills, and seed a self-improving lessons-learned loop into any project.",
+    "version": "1.2.0"
   },
   "plugins": [
     {
       "name": "skill-improver",
       "source": "./plugins/skill-improver",
-      "version": "1.1.0",
-      "description": "Scan all globally installed skills and plugins for source updates (including standalone ~/.agents skills and removed-upstream detection), and improve existing skills via a rubric-driven standard pass or a deep research pass (web, Context7, skills marketplace, GitHub).",
+      "version": "1.2.0",
+      "description": "Scan all globally installed skills and plugins for source updates (including standalone ~/.agents skills and removed-upstream detection), improve existing skills via a rubric-driven standard pass or a deep research pass (web, Context7, skills marketplace, GitHub), and install a self-improving lessons loop \u2014 queue, linked archive, SessionStart hook, oscillation/recurrence checker, and capture + drain skills \u2014 into any project.",
       "category": "development"
     }
   ]

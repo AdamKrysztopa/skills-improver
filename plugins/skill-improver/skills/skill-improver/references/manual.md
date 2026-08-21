@@ -5,12 +5,15 @@ you — what the skill does, how to run it, and how to read what it tells you.
 
 ## What it does
 
-Two jobs:
+Three jobs:
 
 1. **Scan** — checks every globally installed plugin *and* standalone skill
    against its source and tells you what has updates waiting.
 2. **Improve** — takes one skill you own and makes it better: a quick standard
    cleanup, or a deep pass that researches the current state of the art first.
+3. **Seed a lessons loop** — installs into one of your projects the machinery
+   that makes its own tooling improve from the mistakes made while working in
+   it, without you having to remember the machinery is there.
 
 Nothing is ever changed without asking you. Scans are read-only; improvements
 are always proposed first and written only after you approve.
@@ -22,9 +25,10 @@ Just ask in plain language — the skill triggers on phrasing, not commands:
 - "check my skills for updates" / "what's out of date?" → **scan**
 - "improve my research skill" / "give X a cleanup" → **standard pass**
 - "make deck-builder best-in-class" / "really research X" → **deep pass**
+- "we keep making the same mistake here" / "set up a lessons loop" → **seed**
 
-Explicit commands work too: `/skill-improver:upgrade` and
-`/skill-improver:improve <name>`.
+Explicit commands work too: `/skill-improver:upgrade`,
+`/skill-improver:improve <name>` and `/skill-improver:seed-lessons`.
 
 ### Installing / uninstalling
 
@@ -145,6 +149,35 @@ Review the diff, and if you approve:
   local shadow copy at `~/.claude/skills/<name>/` that takes precedence over
   the plugin version. The proposal tells you which applies.
 
+## The lessons loop
+
+What gets installed into your project, and why each piece is there:
+
+| Piece | Default path | What it's for |
+|---|---|---|
+| the queue | `docs/lessons.md` | a short-lived working list. **Empty is healthy.** Entries are written the moment a mistake is caught, not at the end of a session — by then the bug is fixed and the reason is gone |
+| the archive | `docs/LESSONS-ARCHIVE.md` | one dated section per drain, one line per lesson, linked by six edge types. This is the loop's memory |
+| the hook | `.claude/hooks/session_start_lessons.py` | puts the archive's rules into every session automatically, so nobody has to open a file |
+| the checker | `scripts/lessons_graph.py` | fails (exit 1) on **oscillation** — a rule added, later removed as noise, later re-added — and on a rule **re-learned after it was applied**, which means it's in the wrong place, not that it's wrong |
+| capture skill | `.claude/skills/lessons/` | fires when a mistake is caught. Writes one entry and **stops** |
+| drain skill | `.claude/skills/implement-ll/` | fires at a checkpoint. Groups the queue, routes each group to a hook / a CI check / a skill / CLAUDE.md, verifies it binds, archives it, empties the queue |
+
+Paths adapt to what your project already uses (`doc/` vs `docs/`, `bin/` vs
+`scripts/`, an existing `tests/`).
+
+**Ask for "from this session"** if you can. That populates the queue from what
+actually went wrong while you were working, so the first drain has real evidence
+in it instead of being a theoretical exercise.
+
+The one thing worth checking afterwards: the two skills should have been wired
+into checkpoints your project *already* has — its definition of done, its
+release or merge moment. If they were left as things to remember, the loop will
+decay, which is the exact failure it exists to prevent.
+
+Already have a loop installed? The installer stops rather than overwriting, and
+offers an upgrade that refreshes the scripts and skills while leaving your queue
+and archive untouched.
+
 ## Troubleshooting
 
 - **"No installed_plugins.json under …"** — you're pointing at the wrong
@@ -157,3 +190,9 @@ Review the diff, and if you approve:
   deterministic, so the same inputs will reproduce it; report it.
 - **An improvement didn't persist** — it was probably written into a plugin
   cache. See "What you get" above: improvements need a durable home.
+- **The lessons hook shows nothing at session start** — that's correct while
+  the archive is empty; it stays silent rather than printing something
+  reassuring. It also stays silent if the ledger is unreadable, by design: a
+  broken ledger must never block the session that was about to fix it.
+- **"an installation is already here" (exit 2)** — nothing was written. Re-run
+  with `--upgrade`; your queue and archive are preserved either way.

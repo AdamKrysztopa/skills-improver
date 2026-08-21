@@ -36,7 +36,7 @@
     {
       "id": 2,
       "name": "deep-improve-deck-builder",
-      "prompt": "Make my 'deck-builder' skill best-in-class. Really research it — web, current docs, comparable skills — and bring it up to the state of the art.",
+      "prompt": "Make my 'deck-builder' skill best-in-class. Really research it \u2014 web, current docs, comparable skills \u2014 and bring it up to the state of the art.",
       "expected_output": "An improved COPY of deck-builder plus a research-backed proposal citing web/Context7/skills-market/GitHub findings, translating them into concrete edits; verifies tool currency (pandoc/PPTX); marks research provenance when live fetching is degraded; identity preserved; live skill untouched.",
       "files": [],
       "assertions": [
@@ -48,6 +48,25 @@
         "Research findings are marked with provenance: which were fetched live this run vs recalled from prior knowledge, explicitly declaring any research track whose tools were unavailable or blocked",
         "Proposal justifies each change with reasoning/source",
         "Preserves skill identity and core purpose"
+      ]
+    },
+    {
+      "id": 3,
+      "name": "seed-lessons-loop",
+      "prompt": "We keep re-learning the same mistakes in this repo. Set it up so the project actually gets better from them on its own \u2014 using what went wrong in this session as the starting evidence.",
+      "expected_output": "A lessons loop installed into the project \u2014 queue, archive, SessionStart hook, graph checker, capture skill and drain skill, adapted to the project's directory conventions \u2014 with the queue populated from mistakes visible in the session transcript, the hook registered in .claude/settings.json, the checker demonstrated firing against a seeded oscillation and 2x recurrence, and both skills wired into checkpoints that already fire.",
+      "files": [],
+      "assertions": [
+        "Installs all six artefacts (queue, archive, SessionStart hook, graph checker, capture skill, drain skill), adapting paths to the project's existing docs/scripts/tests directory names",
+        "Registers the SessionStart hook in .claude/settings.json without clobbering hooks or settings already there",
+        "Demonstrates the checker firing: runs it against a fixture holding a deliberate oscillation and a 2x recurrence, shows the full reversal chain and the MOVE IT verdict, and shows a non-zero exit \u2014 rather than asserting it works",
+        "Triggers the SessionStart hook and shows the context it actually injects",
+        "Populates the queue from mistakes visible in the session transcript, each with What happened (including how it was caught), a Generalises to written as a followable rule, and a Candidate home marked as a suggestion",
+        "Does not implement or route any queue entry during seeding \u2014 routing is deferred to the drain",
+        "Wires both skills into checkpoints that already fire (a definition of done and a decision-settled moment), amending existing ones rather than inventing a parallel ceremony, and registers the two documents in the project's docs index",
+        "Detects an existing installation and offers an upgrade that preserves the archive and queue, rather than overwriting them",
+        "Both installed skill descriptions trigger on symptoms rather than on the phrase 'lessons learned'",
+        "The archive's own fenced format example is not reported as data by the hook or the checker"
       ]
     }
   ]

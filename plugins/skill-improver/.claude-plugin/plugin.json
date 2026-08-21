@@ -1,7 +1,7 @@
 {
   "name": "skill-improver",
-  "version": "1.1.0",
-  "description": "Audit installed skills and plugins for source updates, and improve existing skills — standard cleanup or a deep, research-backed state-of-the-art pass.",
+  "version": "1.2.0",
+  "description": "Audit installed skills and plugins for source updates, improve existing skills (standard cleanup or a deep, research-backed state-of-the-art pass), and seed a self-improving lessons-learned loop into any project.",
   "author": {
     "name": "AdamKrysztopa"
   },

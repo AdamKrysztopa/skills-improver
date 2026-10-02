@@ -8,9 +8,6 @@ drain and archive take over unchanged.
 
 Registered in .claude/settings.local.json by `seed_lessons.py --jev-provider`.
 Fails open: every error path exits 0 and prints nothing a session could trip on.
-
-Measurement is off unless SKILL_IMPROVER_JEV_EVAL names a file: then one JSON line per Jev call,
-nudge and queue write is appended there, and nothing else about the hook's behaviour changes.
 """
 
 from __future__ import annotations
@@ -41,7 +38,6 @@ TIMEOUT_S = 2.0
 STATE_TTL_S = 86400
 PAUSE_S = 1800
 STATE_VERSION = 1
-EVAL_ENV = "SKILL_IMPROVER_JEV_EVAL"
 
 QUESTION = (
     "Does this event history show a mistake, wrong assumption, drifted document or missing "
@@ -159,15 +155,13 @@ def mark_fired(state: dict, sig: str, *, now: float) -> None:
 
 
 def nudge_text(trigger: str, n_events: int) -> str:
-    """The text Claude sees: stated as project fact, because Claude Code documents that text framed
-    as an out-of-band command can trip prompt-injection defences and be shown to the user instead."""
+    """The text Claude sees. It names the skill; Claude writes the lesson."""
     what = "a tool failure" if trigger == "fail" else "your last prompt"
     return (
-        f"Possible lesson: the lesson detector Jev scored the last {n_events} events, ending at {what}, as "
-        "likely worth capturing (Jev only detects; it never writes lessons). This project records a "
-        "mistake whose cause would recur with the `lessons` skill, at the moment it is caught: one "
-        "queue entry — What happened / Generalises to / Candidate home. The skill's filter applies: a "
-        "cause that cannot be written as a one-sentence rule is routine and gets no entry."
+        f"Possible lesson: after {what}, Jev scored the last {n_events} events as lesson-worthy "
+        "(Jev only detects; it does not write lessons). If this is durable and would recur, "
+        "invoke the `lessons` skill now — What happened / Generalises to / Candidate home — "
+        "then carry on. If it is routine, ignore this."
     )
 
 
@@ -316,43 +310,6 @@ def _sweep(state_dir: Path, now: float) -> None:
             pass
 
 
-# --- optional measurement -----------------------------------------------------
-
-def _noop(_record: dict) -> None:
-    return None
-
-
-def eval_logger(env: dict, project_dir: Path, session: str, now: float):
-    """A function that appends one record to the file SKILL_IMPROVER_JEV_EVAL names, or a no-op.
-
-    Records carry counts, scores and event kinds, plus the title line of a queue entry; never a
-    prompt, command, error text or key. Any failure to write is swallowed.
-    """
-    target = env.get(EVAL_ENV)
-    if not target:
-        return _noop
-    path = Path(project_dir) / target
-
-    def log(record: dict) -> None:
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-            with os.fdopen(fd, "a", encoding="utf-8") as handle:
-                handle.write(json.dumps({"t": int(now), "s": session, **record}) + "\n")
-        except OSError:
-            pass
-
-    return log
-
-
-def queue_titles(tool_input: dict) -> list[str]:
-    """The `### title` lines a queue edit adds, redacted and short."""
-    chunks = [tool_input.get("new_string"), tool_input.get("content")]
-    chunks += [e.get("new_string") for e in tool_input.get("edits") or [] if isinstance(e, dict)]
-    return [redact(line[4:].strip(), 80) for chunk in chunks if isinstance(chunk, str)
-            for line in chunk.splitlines() if line.startswith("### ")][:3]
-
-
 # --- the hook -----------------------------------------------------------------
 
 def _context(event: str, text: str) -> dict:
@@ -383,7 +340,7 @@ def _save(path: Path, state: dict) -> bool:
 
 
 def _judge(event: str, ev: dict, state: dict, provider: str, key: str, path: Path,
-           now: float, transport, log=_noop) -> dict | None:
+           now: float, transport) -> dict | None:
     if state["errs"] >= 3:
         state["paused_until"], state["errs"] = now + PAUSE_S, 0
     if state["blocked"] or now < state["paused_until"] or state["calls"] >= MAX_CALLS:
@@ -399,15 +356,11 @@ def _judge(event: str, ev: dict, state: dict, provider: str, key: str, path: Pat
     try:
         score = transport(provider, key, body)
     except JevError as exc:
-        log({"e": "call", "trigger": ev["k"], "outcome": "error:" + exc.kind})
         return _on_error(exc, event, provider, state, now)
     state["errs"] = 0
-    log({"e": "call", "trigger": ev["k"], "score": round(score, 3),
-         "outcome": "positive" if score >= WORTHY_MIN else "negative"})
     if score < WORTHY_MIN:
         return None
     mark_fired(state, sig, now=now)
-    log({"e": "nudge", "trigger": ev["k"], "events": len(state["window"])})
     return _context(event, nudge_text(ev["k"], len(state["window"])))
 
 
@@ -440,12 +393,9 @@ def run(event: str, payload: dict, provider: str, *, env: dict, project_dir: Pat
     state["window"] = push(state["window"], ev)
     if not _save(path, state):
         return None
-    log = eval_logger(env, project_dir, session[:36], now)
-    if ev["k"] == "edit" and os.path.basename(ev["key"]) == "lessons.md":
-        log({"e": "queue_write", "titles": queue_titles(payload["tool_input"])})
     out = None
     if ev["k"] in ("fail", "prompt"):
-        out = _judge(event, ev, state, provider, key, path, now, transport, log)
+        out = _judge(event, ev, state, provider, key, path, now, transport)
         _save(path, state)
     _sweep(state_dir, now)
     return out

@@ -12,5 +12,7 @@ the part that keeps the loop from decaying.
 Pass along whatever the user said about form: "from this session" / "use what
 went wrong today" means `--seed-from-session` (recommend it — the loop arrives
 carrying evidence); "just set it up" means `--seed`; "show me what it would do"
-means `--dry-run`. Also offer the optional Jev-assisted lesson detection (Workflow 3, Step 1). If a loop is already installed the installer stops with exit 2
-— offer `--upgrade` rather than deleting anything.
+means `--dry-run`. Also offer the optional Jev-assisted lesson detection (Workflow 3, Step 1). Run `--dry-run` first: if it reports
+`EXISTING LOOP DETECTED` (a project seeded by an earlier version), this is an upgrade — offer
+`--upgrade` plus the separate Jev choice (OpenRouter / TypeSafe / Off, never enabled unasked), and
+never delete or reseed. The queue and archive are never touched.

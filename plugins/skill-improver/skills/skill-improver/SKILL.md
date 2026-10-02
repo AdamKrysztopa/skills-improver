@@ -206,6 +206,21 @@ Read `references/lessons-loop.md` before running this. It carries the reasoning
 behind each artefact, and an install that keeps the file names and drops the
 reasoning produces something that looks right and decays within a month.
 
+### Step 0 — Is a loop already here?
+
+Run `python3 <skill-dir>/scripts/seed_lessons.py --dry-run --root <project>` first. If it prints
+**EXISTING LOOP DETECTED**, this is an **upgrade**, not a seed: skip Step 1's three forms and ask
+only the Jev question below, then run `--upgrade` with the answer. A project seeded by v1.2 reports
+Jev as "not enabled" — that is its normal state, not a choice anyone made, so ask; do not infer
+Off and do not enable anything unasked. The upgrade refreshes the generated machinery (each
+changed file keeps a `.bak`), adds what v1.3 needs, leaves the queue, the archive and every
+unrelated hook or setting alone, rolls itself back if its own checks fail, and is safe to repeat:
+
+```bash
+python3 <skill-dir>/scripts/seed_lessons.py --upgrade --root <project>                         # Jev untouched
+python3 <skill-dir>/scripts/seed_lessons.py --upgrade --jev-provider openrouter|typesafe|off --root <project>
+```
+
 ### Step 1 — Confirm the form
 
 Ask which one, unless the user already said:
@@ -224,8 +239,8 @@ already available as (Recommended; `--dry-run --jev-provider <p>` reports whethe
 key is found), otherwise Off. An explicit choice is `--jev-provider
 openrouter|typesafe|off` — on an `--upgrade`, `off` is what removes the hooks.
 Omit the flag only when the user gave no answer, and never enable it without an
-explicit choice. How it works, where the key goes and what fails safely:
-`references/lessons-loop.md`.
+explicit choice. How it works, where the key goes, what fails safely and how to
+measure whether Claude acts on its nudges: `references/lessons-loop.md`.
 
 ### Step 2 — Run the installer
 

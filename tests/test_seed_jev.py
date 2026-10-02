@@ -206,7 +206,8 @@ class SeedJevTests(unittest.TestCase):
         (self.root / "docs/lessons.md").write_text("# Lessons — queue\n\n## Open\n\n### user entry\n")
         (self.root / "docs/LESSONS-ARCHIVE.md").write_text("# archive mine\n")
         before = (self.root / LOCAL).read_text()
-        (self.root / HOOK_REL).write_text("# stale hook\n")
+        legacy = SKILL / "assets/lessons-loop/legacy/hooks/lesson_detect.v1.3.0.py"
+        (self.root / HOOK_REL).write_text(legacy.read_text())
         rc, out = self.seed("--upgrade")
         self.assertEqual(rc, 0, out)
         self.assertIn("user entry", (self.root / "docs/lessons.md").read_text())
@@ -222,7 +223,7 @@ class SeedJevTests(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertFalse((self.root / HOOK_REL).exists())
         self.assertFalse((self.root / LOCAL).exists())
-        self.assertNotIn("Jev", out)
+        self.assertIn("JEV-ASSISTED LESSON DETECTION: not enabled", out)
         self.probe.assert_not_called()
 
     def test_upgrade_can_add_jev_and_can_switch_provider(self):

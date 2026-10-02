@@ -51,6 +51,7 @@ python3 "$SEED" --dry-run              # print the plan and the wiring candidate
 python3 "$SEED" --seed                 # install, with a short worked example in each file
 python3 "$SEED" --seed-from-session    # install with an empty queue, then YOU populate it
 python3 "$SEED" --upgrade              # refresh the machinery, preserve the ledger
+python3 "$SEED" --upgrade --jev-provider openrouter   # optional: Jev-assisted detection
 ```
 
 Useful overrides: `--root PATH`, `--docs-dir`, `--scripts-dir`, `--tests-dir`.
@@ -89,6 +90,36 @@ decision).
 
 **Do not implement any of them.** Routing happens at the drain, where entries can be grouped;
 implementing one in isolation is the reliable way to land it in the wrong artefact.
+
+## Jev-assisted lesson detection (optional)
+
+The loop only works if someone notices a mistake is worth capturing. This optional hook watches a
+compact window of recent events and asks Jev (TypeSafe's decision model, which returns
+probabilities, not text) one question: does this look like a lesson? **Jev detects; Claude writes.**
+A high score injects a short nudge to run the `lessons` skill; the entry, queue, drain, routing,
+archive and checker are unchanged. It changes *when* capture is suggested, nothing else.
+
+- **Enable / disable:** `--jev-provider openrouter | typesafe | off` (with `--seed`,
+  `--seed-from-session` or `--upgrade`). Off removes the hooks; nothing is sent anywhere.
+- **Consent lives in `.claude/settings.local.json`** (personal): three hook registrations for
+  `.claude/hooks/lesson_detect.py`. The installer adds the file to this clone's `.git/info/exclude`,
+  writes no backup of it (it may hold a key), and refuses to register into a copy git tracks. The
+  script is committed and inert, so no commit can turn external calls on for a teammate, and
+  `--upgrade` never enables it by itself.
+- **Credential, never in config:** `OPENROUTER_API_KEY` or `TYPESAFE_API_KEY`, from the process
+  environment (shell profile, or an `env` block in a Claude Code settings file) or a project `.env`
+  (git-ignore it; the installer warns if it isn't). The installer reports whether the key was found
+  and makes one connectivity call; a missing or bad key never fails the install.
+- **What it sends:** at most the last 8 events — truncated, secret-shaped values redacted, paths
+  relative; no file contents, no transcript. This is an external inference call. Per-session state
+  lives in the OS temp dir, not the repo.
+- **Failure:** the hook always exits 0. No key, timeouts, 429s, malformed replies: silent no-op
+  (three transient failures in a row pause calls for 30 minutes). A key that is present but out of
+  credit or rejected pauses detection for the session and warns once per session with the
+  fix and how to turn it off. Off never warns.
+- **Volume control:** one nudge per distinct problem, 10 minutes apart, 3 per session, 30 Jev calls
+  per session. `WORTHY_MIN` and the other constants sit at the top of the hook; they were set on a
+  synthetic replay, so recalibrate against your own sessions.
 
 ## Wiring it into the host project
 

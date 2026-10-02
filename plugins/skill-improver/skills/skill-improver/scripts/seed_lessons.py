@@ -2,13 +2,15 @@
 """Install the self-improving lessons loop into a host project.
 
 Six artefacts — a queue, an archive, a SessionStart hook, a graph checker, and
-two skills — adapted to the host project's directory conventions.
+two skills — adapted to the host project's directory conventions. Optionally a
+seventh: Jev-assisted lesson detection (see --jev-provider).
 
     python3 seed_lessons.py --dry-run            # print the plan, change nothing
     python3 seed_lessons.py --seed               # install, files empty + a worked example
     python3 seed_lessons.py --seed-from-session  # install with an empty queue, to be
                                                  # populated from the session transcript
     python3 seed_lessons.py --upgrade            # refresh the machinery, preserve the ledger
+    python3 seed_lessons.py --seed --jev-provider openrouter   # + Jev-assisted detection
 
 The queue and the archive are DATA. They are created when absent and never
 overwritten, not even by --upgrade: a half-migrated loop that silently drops the
@@ -18,6 +20,8 @@ archive is the worst possible outcome of this feature.
 from __future__ import annotations
 
 import argparse
+import functools
+import importlib.util
 import json
 import os
 import re
@@ -40,6 +44,19 @@ CHECKPOINT_HINTS = (
     "definition of done", "before you commit", "before committing", "checklist",
     "pull request", "contributing", "when you are done", "acceptance",
 )
+
+JEV_PROVIDERS = ("openrouter", "typesafe")
+JEV_LABEL = {"openrouter": "OpenRouter", "typesafe": "TypeSafe (direct)"}
+JEV_EVENTS = (("PostToolUse", "Bash|Edit|Write|MultiEdit"), ("PostToolUseFailure", None),
+              ("UserPromptSubmit", None))
+JEV_STATUS = {
+    "credit": "key found, but the account has no credit — detection stays paused and warns once",
+    "auth": "key found, but the provider rejected it — detection stays paused and warns once",
+    "transient": "provider unreachable or erroring — detection will retry silently",
+    "malformed": "unexpected response from the provider — detection will skip silently",
+}
+LOCAL_SETTINGS = ".claude/settings.local.json"
+USER_CLAUDE_DIR = Path.home() / ".claude"
 
 HOOK_COMMENT = (
     "Injects the applied lessons archive into every session. A process improvement "
@@ -76,6 +93,10 @@ class Layout:
     def hook(self) -> str:
         return f"{self.hooks}/session_start_lessons.py"
 
+    @property
+    def detector(self) -> str:
+        return f"{self.hooks}/lesson_detect.py"
+
 
 def first_existing(root: Path, candidates, default: str) -> str:
     for c in candidates:
@@ -110,10 +131,10 @@ def retarget(text: str, lay: Layout, *, constants: dict | None = None) -> str:
     return text
 
 
-def planned_files(lay: Layout, empty_queue: bool) -> list[dict]:
+def planned_files(lay: Layout, empty_queue: bool, *, with_jev: bool = False) -> list[dict]:
     """Every file the loop installs, with its kind. `data` is never overwritten."""
     tests_root_up = os.path.relpath(lay.root, lay.root / lay.tests)
-    return [
+    files = [
         {"dest": lay.queue, "src": "docs/lessons.md", "kind": "data",
          "role": "the queue — empty is the healthy state",
          "transform": (lambda t: strip_example(t)) if empty_queue else None},
@@ -146,6 +167,10 @@ def planned_files(lay: Layout, empty_queue: bool) -> list[dict]:
         {"dest": f"{lay.tests}/template-queue.md", "src": "docs/lessons.md",
          "kind": "code", "role": "pristine queue"},
     ]
+    if with_jev:
+        files.append({"dest": lay.detector, "src": "hooks/lesson_detect.py", "kind": "code",
+                      "role": "Jev-assisted detection — Jev scores, Claude still writes the lesson"})
+    return files
 
 
 def strip_example(text: str) -> str:
@@ -181,6 +206,209 @@ def settings_action(lay: Layout) -> tuple[str, dict]:
     })
     verb = "register SessionStart hook" if path.exists() else "create with SessionStart hook"
     return (verb, settings)
+
+
+def write_settings(path: Path, merged: dict, *, backup: bool = True, private: bool = False) -> None:
+    """Write a settings file, keeping a .bak of whatever was there unless it may hold credentials."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existed = path.exists()
+    if existed and backup:
+        shutil.copy2(path, path.with_suffix(path.suffix + ".bak"))
+    path.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
+    if private and not existed:
+        path.chmod(0o600)
+
+
+# --- Jev-assisted lesson detection -------------------------------------------
+
+@functools.lru_cache(maxsize=1)
+def load_detector():
+    """The installed hook's own module, so provider names, key lookup and the client live once."""
+    spec = importlib.util.spec_from_file_location("lesson_detect", ASSETS / "hooks" / "lesson_detect.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def settings_env(root: Path) -> dict:
+    """The `env` blocks Claude Code exports to hooks: user, project, then personal project settings."""
+    merged: dict = {}
+    for path in (USER_CLAUDE_DIR / "settings.json", root / ".claude" / "settings.json", root / LOCAL_SETTINGS):
+        try:
+            block = json.loads(path.read_text(encoding="utf-8")).get("env", {})
+        except (OSError, ValueError, AttributeError):
+            continue
+        if isinstance(block, dict):
+            merged.update({k: v for k, v in block.items() if isinstance(v, str)})
+    return merged
+
+
+def find_jev_key(provider: str, root: Path) -> tuple[str | None, str]:
+    """(key, where it was found). Mirrors what the hook will see at runtime."""
+    det = load_detector()
+    name = det.PROVIDERS[provider][2]
+    from_settings = settings_env(root)
+    env = {**from_settings, **{k: v for k, v in os.environ.items() if v}}
+    source = "environment" if os.environ.get(name) else (
+        "Claude Code settings" if from_settings.get(name) else ".env")
+    return det.find_key(provider, env, root), source
+
+
+def jev_probe(provider: str, key: str) -> None:
+    """One minimal call: proves the key, the endpoint and the credit. Raises JevError."""
+    det = load_detector()
+    body = det.build_body(det.PROVIDERS[provider][1], [{"k": "ok", "key": "probe"}], "fail")
+    det.call_jev(provider, key, body)
+
+
+def jev_command(lay: Layout, provider: str) -> str:
+    return f'python3 "$CLAUDE_PROJECT_DIR/{lay.detector}" {provider} || true'  # a missing script must never exit 2
+
+
+def _ours(hook: dict) -> bool:
+    return "lesson_detect.py" in str(hook.get("command", ""))
+
+
+def _strip_detector(hooks: dict) -> None:
+    for event in list(hooks):
+        kept = []
+        for group in hooks[event]:
+            if any(_ours(h) for h in group.get("hooks", [])):
+                group["hooks"] = [h for h in group["hooks"] if not _ours(h)]
+                if not group["hooks"]:
+                    continue
+            kept.append(group)
+        hooks[event] = kept
+        if not kept:
+            del hooks[event]
+
+
+def _is_registered(hooks: dict, command: str) -> bool:
+    for event, matcher in JEV_EVENTS:
+        found = any(g.get("matcher") == matcher and any(h.get("command") == command for h in g["hooks"])
+                    for g in hooks.get(event, []))
+        if not found:
+            return False
+    return True
+
+
+def jev_settings_action(lay: Layout, provider: str) -> tuple[str, dict]:
+    """Return (verdict, merged-settings) for .claude/settings.local.json, writing nothing.
+
+    Opt-in lives in this personal, git-ignored file so that no commit can enable external
+    calls for a teammate. `off` removes only this detector's entries.
+    """
+    path = lay.root / LOCAL_SETTINGS
+    try:
+        settings = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        if not isinstance(settings, dict):
+            raise ValueError("not a JSON object")
+        hooks = settings.get("hooks", {})
+        hooks = settings["hooks"] = hooks if isinstance(hooks, dict) else {}
+    except (OSError, ValueError) as exc:
+        return (f"UNPARSEABLE ({exc}) — register the Jev hooks by hand", {})
+
+    if provider != "off" and is_tracked(lay.root, LOCAL_SETTINGS):
+        return ("REFUSED (tracked by git — a registration here would be shared with teammates; "
+                "untrack the file or register by hand)", {})
+    command = jev_command(lay, provider)
+    if provider != "off" and _is_registered(hooks, command):
+        return ("already registered", settings)
+    had_any = any(_ours(h) for groups in hooks.values() for g in groups for h in g.get("hooks", []))
+    _strip_detector(hooks)
+    if provider == "off":
+        if not hooks:
+            del settings["hooks"]
+        return ("remove Jev hooks" if had_any else "not registered", settings)
+    for event, matcher in JEV_EVENTS:
+        group = {"hooks": [{"type": "command", "command": command, "timeout": 5}]}
+        if matcher:
+            group = {"matcher": matcher, **group}
+        hooks.setdefault(event, []).append(group)
+    return (f"register Jev hooks ({provider})", settings)
+
+
+def _git(root: Path, *args: str) -> subprocess.CompletedProcess | None:
+    try:
+        return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True)
+    except OSError:
+        return None
+
+
+def is_tracked(root: Path, rel: str) -> bool:
+    proc = _git(root, "ls-files", "--error-unmatch", rel)
+    return proc is not None and proc.returncode == 0
+
+
+def ensure_local_exclude(root: Path, rel: str) -> None:
+    """Keep `rel` out of commits via this clone's .git/info/exclude, unless git already ignores it.
+
+    Claude Code only excludes settings.local.json when it writes the file itself; ours is written here.
+    """
+    proc = _git(root, "check-ignore", "-q", rel)
+    if proc is None or proc.returncode != 1:
+        return
+    where = _git(root, "rev-parse", "--git-path", "info/exclude")
+    if where is None or where.returncode != 0:
+        return
+    exclude = root / where.stdout.strip()
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    with exclude.open("a", encoding="utf-8") as handle:
+        handle.write(rel + "\n")
+
+
+def dotenv_unignored(root: Path) -> bool:
+    """True when a project `.env` exists inside a git repo that does not ignore it."""
+    if not (root / ".env").is_file():
+        return False
+    try:
+        proc = subprocess.run(["git", "check-ignore", "-q", ".env"], cwd=root, capture_output=True)
+    except OSError:
+        return False
+    return proc.returncode == 1
+
+
+def report_jev(lay: Layout, provider: str, verdict: str, *, dry_run: bool) -> None:
+    """The Jev report, or a plain statement that it could not be enabled."""
+    if verdict.startswith(("UNPARSEABLE", "REFUSED")):
+        if provider != "off":
+            print("\nJev-assisted lesson detection is NOT enabled (see above). "
+                  "The base lessons loop is installed and unaffected.")
+        return
+    jev_report(lay, provider, dry_run=dry_run)
+
+
+def jev_report(lay: Layout, provider: str, *, dry_run: bool) -> None:
+    """Say plainly what is and is not active. A Jev problem never changes the exit code."""
+    if provider == "off":
+        print("\nJEV-ASSISTED LESSON DETECTION: off (its hooks are unregistered; nothing is sent anywhere).")
+        return
+    det = load_detector()
+    name = det.PROVIDERS[provider][2]
+    key, source = find_jev_key(provider, lay.root)
+    status = "skipped — no credential"
+    if key and dry_run:
+        status = "skipped (dry run)"
+    elif key:
+        try:
+            jev_probe(provider, key)
+            status = "OK"
+        except det.JevError as exc:
+            status = JEV_STATUS[exc.kind]
+    rows = [
+        ("Provider", JEV_LABEL[provider]),
+        ("Credential", f"found ({source})" if key else
+         f"missing — set {name} (shell profile, or a git-ignored .env in the project); "
+         "detection stays inactive until it is found"),
+        ("Connectivity", status),
+        ("Registration", f"{LOCAL_SETTINGS} (personal, git-ignored by Claude Code)"),
+    ]
+    print("\nJEV-ASSISTED LESSON DETECTION (optional — Jev scores a compact window; Claude writes the lesson)")
+    for label, value in rows:
+        print(f"  {label:<13}: {value}")
+    if key and source == ".env" and dotenv_unignored(lay.root):
+        print("  !! .env holds the key and is not git-ignored — add it to .gitignore.")
+    print("Base lessons loop installed successfully — nothing above affects it.")
 
 
 # --- wiring reconnaissance --------------------------------------------------
@@ -296,6 +524,9 @@ def main(argv: list[str]) -> int:
                       help="install with an empty queue, to be populated from the transcript")
     mode.add_argument("--upgrade", action="store_true",
                       help="refresh hook, checker, skills and tests; never touch the ledger")
+    p.add_argument("--jev-provider", choices=("off", *JEV_PROVIDERS),
+                   help="enable Jev-assisted lesson detection through this provider, or `off` to "
+                        "remove it; omitted = leave as is (a fresh install is off)")
     p.add_argument("--dry-run", action="store_true",
                    help="print what would be created and where it would wire in")
     p.add_argument("--root", default=".", help="the host project (default: cwd)")
@@ -312,7 +543,9 @@ def main(argv: list[str]) -> int:
         print(f"error: {lay.root} is not a directory", file=sys.stderr)
         return 1
 
-    files = planned_files(lay, empty_queue=args.seed_from_session)
+    provider = args.jev_provider
+    wants_jev = provider in JEV_PROVIDERS or (args.upgrade and (lay.root / lay.detector).exists())
+    files = planned_files(lay, empty_queue=args.seed_from_session, with_jev=wants_jev)
     present = [f for f in files if (lay.root / f["dest"]).exists()]
     installed_already = any(f["kind"] == "code" for f in present)
 
@@ -338,6 +571,10 @@ def main(argv: list[str]) -> int:
     verdict, merged = settings_action(lay)
     print(f"  {verdict:34} {lay.hooks.rsplit('/', 1)[0]}/settings.json")
     print(f"  {'':34} └─ {hook_command(lay)}")
+    if provider:
+        jev_verdict, jev_merged = jev_settings_action(lay, provider)
+        print(f"  {jev_verdict:34} {LOCAL_SETTINGS}")
+        print(f"  {'':34} └─ {jev_command(lay, provider) if provider != 'off' else 'no Jev hooks registered'}")
 
     # --- upgrade gate -------------------------------------------------------
     if installed_already and not args.upgrade and not args.dry_run:
@@ -351,6 +588,8 @@ def main(argv: list[str]) -> int:
         return 2
 
     if args.dry_run:
+        if provider:
+            report_jev(lay, provider, jev_verdict, dry_run=True)
         report_wiring(lay)
         print("\n--dry-run: nothing was written.")
         return 0
@@ -364,16 +603,22 @@ def main(argv: list[str]) -> int:
         print("  (nothing — every file was already present and preserved)")
 
     if merged and verdict not in ("already registered",) and not verdict.startswith("UNPARSEABLE"):
-        settings_path = lay.root / ".claude" / "settings.json"
-        settings_path.parent.mkdir(parents=True, exist_ok=True)
-        if settings_path.exists():
-            shutil.copy2(settings_path, settings_path.with_suffix(".json.bak"))
-        settings_path.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
+        write_settings(lay.root / ".claude" / "settings.json", merged)
         print(f"  .claude/settings.json ({verdict})")
     elif verdict.startswith("UNPARSEABLE"):
         print(f"  !! .claude/settings.json {verdict}")
+    if provider:
+        if jev_verdict.startswith(("UNPARSEABLE", "REFUSED")):
+            print(f"  !! {LOCAL_SETTINGS} {jev_verdict}")
+        elif jev_verdict not in ("already registered", "not registered"):
+            if provider != "off":
+                ensure_local_exclude(lay.root, LOCAL_SETTINGS)
+            write_settings(lay.root / LOCAL_SETTINGS, jev_merged, backup=False, private=True)
+            print(f"  {LOCAL_SETTINGS} ({jev_verdict})")
 
     rc = verify(lay)
+    if provider:
+        report_jev(lay, provider, jev_verdict, dry_run=False)
     report_wiring(lay)
 
     if args.seed_from_session:

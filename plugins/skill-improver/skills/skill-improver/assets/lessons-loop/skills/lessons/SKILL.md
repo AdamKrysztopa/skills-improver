@@ -7,7 +7,8 @@ description: >-
   already settled in the repo, a defect is found by running the software rather
   than by its tests, a bug survives more than one fix attempt, a check passed
   something it should have caught, or something only worked after a non-obvious
-  discovery. Capture only — it does not implement the fix.
+  discovery, or when a "Possible lesson" nudge appears. Capture only — it does not implement
+  the fix.
 ---
 
 # Capture a lesson
@@ -66,6 +67,9 @@ second is a bug; the first is a gap in the gate.
 
 A queue padded with those is a queue nobody drains. If it does not generalise past the file it
 happened in, fix the file and move on.
+
+A "Possible lesson" nudge (from the optional Jev detector) only says a moment may qualify. Apply the
+same filter: if `Generalises to` cannot be written as a rule, ignore the nudge.
 
 ## Stop here
 

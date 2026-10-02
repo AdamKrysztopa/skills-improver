@@ -61,6 +61,27 @@ and offer `--upgrade`, which backs up each code file to `.bak` and never touches
 archive. Do not work around it by deleting files first: a half-migrated loop that silently drops
 the archive is the worst possible outcome of this feature.
 
+### Upgrading a project seeded by an older version
+
+A project seeded by v1.2 and then upgraded at the plugin level still has the v1.2 machinery and no
+Jev. `--dry-run` reports `EXISTING LOOP DETECTED`, how many generated files are stale (it compares
+each against what this plugin would write — the artefacts are the version record, nothing extra is
+stored) and what Jev is doing. Then `--upgrade [--jev-provider ...]`.
+
+- **Preserved:** `lessons.md` and `LESSONS-ARCHIVE.md` (never opened for writing), the existing
+  SessionStart registration (even a hand-edited command), every other hook, permission and setting.
+- **Layout is read back from the installed hook**, not re-guessed from the directories the project
+  has grown since; an install whose hook points somewhere the installer cannot reproduce stops with
+  `--docs-dir` guidance and writes nothing.
+- **Refreshed:** only files that differ. A second run writes nothing. A `.bak` is never overwritten —
+  a later upgrade adds `.bak.1`, so a hand-edited hook stays recoverable.
+- **All or nothing:** files are written through a journal; a write error, or a failure of the
+  upgraded machinery's own checks, restores every file and prints `rolled back`.
+- **Jev is a separate, explicit answer.** No flag leaves it exactly as found (`enabled (provider)`,
+  `installed but not registered`, or `not enabled`); only `--jev-provider` changes it, and it never
+  switches provider on its own. "Never chosen" and "chosen Off" leave identical artefacts and are
+  treated identically — nothing acts on the difference.
+
 The installer ends by *running* the checker against a deliberately broken fixture, triggering the
 hook and printing what it injects, and running the loop's test suite. Read that output — a hook is
 code, and a green test suite is not a working binary. Pass it along to the user.
@@ -120,6 +141,32 @@ archive and checker are unchanged. It changes *when* capture is suggested, nothi
 - **Volume control:** one nudge per distinct problem, 10 minutes apart, 3 per session, 30 Jev calls
   per session. `WORTHY_MIN` and the other constants sit at the top of the hook; they were set on a
   synthetic replay, so recalibrate against your own sessions.
+
+### Measuring whether Claude acts on a nudge
+
+Off by default. Set `SKILL_IMPROVER_JEV_EVAL` to a file (absolute, outside the repo, or relative to
+the project and git-ignored) before starting Claude Code and the hook appends one JSON line per Jev
+call, nudge and queue write: counts, scores and the `###` title of a written entry — never a
+prompt, command, error text or key. It changes nothing the session or the state files can observe.
+
+```bash
+python3 <skill-dir>/scripts/jev_eval.py "$SKILL_IMPROVER_JEV_EVAL" --queue docs/lessons.md
+```
+
+reports calls, positives, nudges, nudges **followed** (an entry written to the queue after the
+nudge, same session) vs **ignored**, entries Claude wrote on its own, and whether the followed
+entries are still queued or drained. A skill invocation that ends in "routine, no entry" counts as
+ignored, which is the right reading. The accepted/declined split at drain is not recoverable from
+the archive, which does not link a row to its entry; the drain report carries it.
+
+`tests/dogfood_nudge.py` measures the same thing with real `claude -p` sessions and a fixed nudge,
+without Jev. Measured at v1.3.1 (sonnet, 3-9 runs per cell; indicative, not statistical): with the
+user saying the mistake is a repeat, no nudge → `lessons` used 2/6; v1.3.0's imperative wording →
+9/10; the factual wording → 9/9; a routine typo → 0/3 under both; a plain fix request with no
+mistake in sight → 0/6 under all three. The nudge lifts capture on a real lesson without making
+Claude capture non-lessons. The wording was changed because Claude Code's hook documentation says
+text framed as a system command can trip prompt-injection defences; the data did not show the old
+wording failing. Not measured: the PostToolUseFailure path end to end.
 
 ## Wiring it into the host project
 

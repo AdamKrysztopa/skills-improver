@@ -102,7 +102,8 @@ class CoreTests(unittest.TestCase):
     def test_nudge_names_the_skill_and_leaves_authorship_to_claude(self):
         text = D.nudge_text("fail", 5)
         self.assertIn("`lessons` skill", text)
-        self.assertIn("ignore", text.lower())
+        self.assertIn("routine", text)
+        self.assertNotIn("invoke", text.lower())
 
 
 KEY = "sk-or-v1-" + "ab12" * 16

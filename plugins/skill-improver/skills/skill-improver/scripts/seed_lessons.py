@@ -24,8 +24,9 @@ import functools
 import importlib.util
 import json
 import os
+import posixpath
 import re
-import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -76,6 +77,7 @@ class Layout:
         self.hooks = hooks
         self.skills = skills
         self.tests = tests
+        self.recovered = False
 
     @property
     def archive(self) -> str:
@@ -105,13 +107,61 @@ def first_existing(root: Path, candidates, default: str) -> str:
     return default
 
 
+class LayoutError(Exception):
+    """The installed hook points somewhere the installer cannot reproduce."""
+
+
+def recover_layout(root: Path, args) -> dict:
+    """Read an existing install's layout back from its own SessionStart hook.
+
+    The hook carries the directories the installer chose. Re-detecting from the project's
+    current directories instead would, once the project grows a `docs/` or `scripts/`, point
+    the upgraded hook at an empty ledger and leave the real one orphaned.
+
+    Returns:
+        {} when no generated hook is installed; otherwise docs, scripts and (when found) tests.
+
+    Raises:
+        LayoutError: The hook's ledger paths are not ones this installer can write.
+    """
+    try:
+        text = (root / ".claude/hooks/session_start_lessons.py").read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    consts = {n: re.search(rf'^{n} = "(.*)"$', text, re.M) for n in ("SCRIPTS_REL", "ARCHIVE_REL", "QUEUE_REL")}
+    if not all(consts.values()):
+        return {}
+    scripts, archive, queue = (consts[n].group(1) for n in ("SCRIPTS_REL", "ARCHIVE_REL", "QUEUE_REL"))
+    docs = posixpath.dirname(queue)
+    if not args.docs_dir and (posixpath.dirname(archive) != docs or posixpath.basename(queue) != "lessons.md"
+                              or posixpath.basename(archive) != "LESSONS-ARCHIVE.md"):
+        raise LayoutError(
+            f"the installed hook reads its queue from {queue} and its archive from {archive}, which "
+            "this installer cannot reproduce. Nothing was written. Pass --docs-dir to say where "
+            "lessons.md and LESSONS-ARCHIVE.md live, or reconcile the hook by hand.")
+    found = {"docs": docs or ".", "scripts": scripts}
+    for candidate in (*(f"{t}/lessons_loop" for t in TEST_DIR_CANDIDATES), f"{scripts}/lessons_loop_tests"):
+        if (root / candidate / "test_lessons_loop.py").is_file():
+            found["tests"] = candidate
+            break
+    return found
+
+
 def detect_layout(args) -> Layout:
     root = Path(args.root).resolve()
-    docs = args.docs_dir or first_existing(root, DOC_DIR_CANDIDATES, "docs")
-    scripts = args.scripts_dir or first_existing(root, SCRIPT_DIR_CANDIDATES, "scripts")
-    tests_base = args.tests_dir or first_existing(root, TEST_DIR_CANDIDATES, "")
-    tests = f"{tests_base}/lessons_loop" if tests_base else f"{scripts}/lessons_loop_tests"
-    return Layout(root, docs, scripts, ".claude/hooks", ".claude/skills", tests)
+    known = recover_layout(root, args) if root.is_dir() else {}
+    docs = args.docs_dir or known.get("docs") or first_existing(root, DOC_DIR_CANDIDATES, "docs")
+    scripts = args.scripts_dir or known.get("scripts") or first_existing(root, SCRIPT_DIR_CANDIDATES, "scripts")
+    if args.tests_dir:
+        tests = f"{args.tests_dir}/lessons_loop"
+    elif "tests" in known:
+        tests = known["tests"]
+    else:
+        tests_base = first_existing(root, TEST_DIR_CANDIDATES, "")
+        tests = f"{tests_base}/lessons_loop" if tests_base else f"{scripts}/lessons_loop_tests"
+    lay = Layout(root, docs, scripts, ".claude/hooks", ".claude/skills", tests)
+    lay.recovered = bool(known)
+    return lay
 
 
 # --- retargeting ------------------------------------------------------------
@@ -148,7 +198,8 @@ def planned_files(lay: Layout, empty_queue: bool, *, with_jev: bool = False) -> 
          "constants": {"SCRIPTS_REL": lay.scripts, "ARCHIVE_REL": lay.archive,
                        "QUEUE_REL": lay.queue}},
         {"dest": f"{lay.skills}/lessons/SKILL.md", "src": "skills/lessons/SKILL.md",
-         "kind": "code", "role": "capture — writes one entry and stops"},
+         "kind": "code", "role": "capture — writes one entry and stops",
+         "legacy": ["legacy/skills/lessons/SKILL.v1.2.0.md"]},
         {"dest": f"{lay.skills}/implement-ll/SKILL.md",
          "src": "skills/implement-ll/SKILL.md", "kind": "code",
          "role": "drain — group, route, apply, verify, archive"},
@@ -169,7 +220,8 @@ def planned_files(lay: Layout, empty_queue: bool, *, with_jev: bool = False) -> 
     ]
     if with_jev:
         files.append({"dest": lay.detector, "src": "hooks/lesson_detect.py", "kind": "code",
-                      "role": "Jev-assisted detection — Jev scores, Claude still writes the lesson"})
+                      "role": "Jev-assisted detection — Jev scores, Claude still writes the lesson",
+                      "legacy": ["legacy/hooks/lesson_detect.v1.3.0.py"]})
     return files
 
 
@@ -179,6 +231,76 @@ def strip_example(text: str) -> str:
     if not sep:
         return text
     return head.rstrip() + "\n"
+
+
+# --- journal ----------------------------------------------------------------
+
+class Journal:
+    """Every file the installer touches goes through here, so a failed run can be undone exactly.
+
+    A backup is only ever added, never overwritten: the first one holds the file as the user
+    left it, and a later upgrade must not replace it with a machine-generated version.
+    """
+
+    def __init__(self):
+        self._undo: list[tuple[Path, bytes | None, int, Path | None]] = []
+        self._dirs: list[Path] = []
+
+    def _backup_for(self, path: Path, prior: bytes) -> Path | None:
+        n = 0
+        while True:
+            candidate = path.with_name(path.name + ".bak" + (f".{n}" if n else ""))
+            if not candidate.exists():
+                return candidate
+            if candidate.read_bytes() == prior:
+                return None
+            n += 1
+
+    def _mkdirs(self, directory: Path) -> None:
+        missing = []
+        while not directory.exists():
+            missing.append(directory)
+            directory = directory.parent
+        for d in reversed(missing):
+            d.mkdir()
+            self._dirs.append(d)
+
+    def write(self, path: Path, text: str, *, backup: bool = True, mode: int | None = None) -> None:
+        prior = path.read_bytes() if path.exists() else None
+        prior_mode = stat.S_IMODE(path.stat().st_mode) if prior is not None else 0o644
+        self._mkdirs(path.parent)
+        bak = self._backup_for(path, prior) if prior is not None and backup else None
+        if bak:
+            bak.write_bytes(prior)
+        tmp = path.with_name(path.name + ".tmp")
+        try:
+            fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(text)
+            tmp.chmod(mode if mode is not None else prior_mode)
+            os.replace(tmp, path)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            if bak:
+                bak.unlink(missing_ok=True)
+            raise
+        self._undo.append((path, prior, prior_mode, bak))
+
+    def rollback(self) -> None:
+        for path, prior, mode, bak in reversed(self._undo):
+            if prior is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.write_bytes(prior)
+                path.chmod(mode)
+            if bak:
+                bak.unlink(missing_ok=True)
+        for directory in reversed(self._dirs):
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
+        self._undo, self._dirs = [], []
 
 
 # --- settings.json ----------------------------------------------------------
@@ -208,15 +330,14 @@ def settings_action(lay: Layout) -> tuple[str, dict]:
     return (verb, settings)
 
 
-def write_settings(path: Path, merged: dict, *, backup: bool = True, private: bool = False) -> None:
-    """Write a settings file, keeping a .bak of whatever was there unless it may hold credentials."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    existed = path.exists()
-    if existed and backup:
-        shutil.copy2(path, path.with_suffix(path.suffix + ".bak"))
-    path.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
-    if private and not existed:
-        path.chmod(0o600)
+def write_settings(path: Path, merged: dict, journal: Journal, *, private: bool = False) -> None:
+    """Write a settings file through the journal.
+
+    Settings that hold an `env` block may hold credentials, and a `.bak` beside them is an
+    untracked copy that is one `git add .` from a commit — so those are not backed up.
+    """
+    journal.write(path, json.dumps(merged, indent=2) + "\n", backup=not private and "env" not in merged,
+                  mode=0o600 if private and not path.exists() else None)
 
 
 # --- Jev-assisted lesson detection -------------------------------------------
@@ -326,6 +447,44 @@ def jev_settings_action(lay: Layout, provider: str) -> tuple[str, dict]:
             group = {"matcher": matcher, **group}
         hooks.setdefault(event, []).append(group)
     return (f"register Jev hooks ({provider})", settings)
+
+
+def jev_state(lay: Layout) -> tuple[str, str | None]:
+    """What this project's personal settings say about Jev, read from the artefacts alone.
+
+    Returns:
+        ("enabled", provider), ("off", None) when the detector script is installed but nothing
+        registers it, or ("absent", None) — a project seeded before Jev existed, or one that
+        never chose it. The last two are not told apart and need not be: neither is acted on.
+    """
+    try:
+        hooks = json.loads((lay.root / LOCAL_SETTINGS).read_text(encoding="utf-8")).get("hooks", {})
+        for groups in hooks.values():
+            for group in groups:
+                for hook in group.get("hooks", []):
+                    found = re.search(r"lesson_detect\.py\"?\s+(\w+)", str(hook.get("command", "")))
+                    if _ours(hook) and found and found.group(1) in JEV_PROVIDERS:
+                        return ("enabled", found.group(1))
+    except (OSError, ValueError, AttributeError, TypeError):
+        pass
+    return ("off", None) if (lay.root / lay.detector).exists() else ("absent", None)
+
+
+def report_jev_state(lay: Layout) -> None:
+    """The Jev status of an existing loop when the run was not asked to change it."""
+    state, provider = jev_state(lay)
+    label = "JEV-ASSISTED LESSON DETECTION"
+    if state == "enabled":
+        print(f"\n{label}: enabled ({provider}) — unchanged by this run.")
+        return
+    lead = ("installed but not registered (off)" if state == "off"
+            else "not enabled — projects seeded before v1.3 have no Jev registration; that is their normal state")
+    print(f"\n{label}: {lead}. Nothing is sent anywhere, and this run did not change that.")
+    keys = []
+    for name in JEV_PROVIDERS:
+        key, source = find_jev_key(name, lay.root)
+        keys.append(f"{name}: key " + (f"found ({source})" if key else "not found"))
+    print(f"  Enable it explicitly with --jev-provider openrouter|typesafe ({'; '.join(keys)}).")
 
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess | None:
@@ -439,24 +598,43 @@ def wiring_candidates(lay: Layout) -> dict:
 
 # --- install ----------------------------------------------------------------
 
-def install(lay: Layout, files: list[dict], upgrade: bool) -> list[str]:
+def render(lay: Layout, f: dict, src: str | None = None) -> str:
+    text = (ASSETS / (src or f["src"])).read_text(encoding="utf-8")
+    if f.get("transform"):
+        text = f["transform"](text)
+    return retarget(text, lay, constants=f.get("constants"))
+
+
+def file_state(lay: Layout, f: dict) -> str:
+    """What the installer would find at this destination.
+
+    create | data | current | outdated (an earlier shipped version, safe to refresh) |
+    customised (anything else: the project's own edit, which the drain makes on purpose).
+    """
+    dest = lay.root / f["dest"]
+    if not dest.exists():
+        return "create"
+    if f["kind"] == "data":
+        return "data"
+    try:
+        found = dest.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return "customised"
+    if found == render(lay, f):
+        return "current"
+    return "outdated" if any(found == render(lay, f, old) for old in f.get("legacy", ())) else "customised"
+
+
+def install(lay: Layout, files: list[dict], upgrade: bool, journal: Journal) -> list[str]:
+    """Write what is missing, and with --upgrade what is stale. Rendering finishes before the first write."""
+    todo = [(f, render(lay, f)) for f in files if file_state(lay, f) == "create"
+            or (upgrade and file_state(lay, f) == "outdated")]
     written = []
-    for f in files:
+    for f, text in todo:
         dest = lay.root / f["dest"]
-        exists = dest.exists()
-        if exists and (f["kind"] == "data" or not upgrade):
-            continue
-        text = (ASSETS / f["src"]).read_text(encoding="utf-8")
-        if f.get("transform"):
-            text = f["transform"](text)
-        text = retarget(text, lay, constants=f.get("constants"))
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        if exists:
-            shutil.copy2(dest, dest.with_suffix(dest.suffix + ".bak"))
-        dest.write_text(text, encoding="utf-8")
-        if f["src"].endswith(".py"):
-            dest.chmod(0o755)
-        written.append(f["dest"] + (" (was backed up to .bak)" if exists else ""))
+        existed = dest.exists()
+        journal.write(dest, text, mode=0o755 if f["src"].endswith(".py") else None)
+        written.append(f["dest"] + (" (previous version kept as .bak)" if existed else ""))
     return written
 
 
@@ -538,7 +716,11 @@ def main(argv: list[str]) -> int:
     if not (args.seed or args.seed_from_session or args.upgrade or args.dry_run):
         p.error("pick one of --seed, --seed-from-session, --upgrade, or --dry-run")
 
-    lay = detect_layout(args)
+    try:
+        lay = detect_layout(args)
+    except LayoutError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     if not lay.root.is_dir():
         print(f"error: {lay.root} is not a directory", file=sys.stderr)
         return 1
@@ -549,23 +731,35 @@ def main(argv: list[str]) -> int:
     present = [f for f in files if (lay.root / f["dest"]).exists()]
     installed_already = any(f["kind"] == "code" for f in present)
 
+    states = {f["dest"]: file_state(lay, f) for f in files}
+    outdated = [d for d, st in states.items() if st == "outdated"]
+    customised = [d for d, st in states.items() if st == "customised"]
     print(f"project root : {lay.root}")
     print(f"layout       : docs={lay.docs}/  scripts={lay.scripts}/  "
-          f"hooks={lay.hooks}/  skills={lay.skills}/  tests={lay.tests}/")
+          f"hooks={lay.hooks}/  skills={lay.skills}/  tests={lay.tests}/"
+          + ("   (read from the installed hook)" if lay.recovered else ""))
+    if installed_already:
+        print(f"\nEXISTING LOOP DETECTED — {len(outdated)} generated file(s) are an older shipped version, "
+              f"{len(customised)} carry your own edits.")
+        print("  The queue and the archive are data and are never touched; this is an upgrade, not a seed.")
     print()
 
     # --- the plan -----------------------------------------------------------
     print("PLAN")
     for f in files:
-        exists = (lay.root / f["dest"]).exists()
-        if not exists:
+        state = states[f["dest"]]
+        if state == "create":
             verdict = "create"
-        elif f["kind"] == "data":
+        elif state == "data":
             verdict = "PRESERVE (data — never overwritten)"
+        elif state == "current":
+            verdict = "up to date"
+        elif state == "customised":
+            verdict = "KEEP (edited in this project)"
         elif args.upgrade:
             verdict = "upgrade (.bak kept)"
         else:
-            verdict = "exists — needs --upgrade"
+            verdict = "older version — needs --upgrade"
         print(f"  {verdict:34} {f['dest']}")
         print(f"  {'':34} └─ {f['role']}")
     verdict, merged = settings_action(lay)
@@ -585,40 +779,49 @@ def main(argv: list[str]) -> int:
         print("(hook, checker, skills, tests — each backed up to .bak first).")
         print("The queue and the archive are preserved either way: a half-migrated")
         print("loop that silently drops the archive is the worst outcome here.")
+        if not provider:
+            report_jev_state(lay)
         return 2
 
     if args.dry_run:
         if provider:
             report_jev(lay, provider, jev_verdict, dry_run=True)
+        elif installed_already:
+            report_jev_state(lay)
+        report_customised(customised)
         report_wiring(lay)
         print("\n--dry-run: nothing was written.")
+        if installed_already:
+            print("Upgrade: --upgrade [--jev-provider openrouter|typesafe|off]")
         return 0
 
     # --- write --------------------------------------------------------------
-    written = install(lay, files, upgrade=args.upgrade)
-    print("\nWROTE")
-    for w in written:
-        print(f"  {w}")
-    if not written:
-        print("  (nothing — every file was already present and preserved)")
-
-    if merged and verdict not in ("already registered",) and not verdict.startswith("UNPARSEABLE"):
-        write_settings(lay.root / ".claude" / "settings.json", merged)
-        print(f"  .claude/settings.json ({verdict})")
-    elif verdict.startswith("UNPARSEABLE"):
-        print(f"  !! .claude/settings.json {verdict}")
-    if provider:
-        if jev_verdict.startswith(("UNPARSEABLE", "REFUSED")):
-            print(f"  !! {LOCAL_SETTINGS} {jev_verdict}")
-        elif jev_verdict not in ("already registered", "not registered"):
-            if provider != "off":
-                ensure_local_exclude(lay.root, LOCAL_SETTINGS)
-            write_settings(lay.root / LOCAL_SETTINGS, jev_merged, backup=False, private=True)
-            print(f"  {LOCAL_SETTINGS} ({jev_verdict})")
+    journal = Journal()
+    try:
+        written = install(lay, files, upgrade=args.upgrade, journal=journal)
+        print("\nWROTE")
+        for w in written:
+            print(f"  {w}")
+        if not written:
+            print("  (nothing — every file was already current or preserved)")
+        wrote_settings(lay, merged, verdict, provider, jev_merged if provider else None,
+                       jev_verdict if provider else "", journal)
+    except OSError as exc:
+        journal.rollback()
+        print(f"\n!! write failed ({exc}) — rolled back: every file is as it was before this run.")
+        return 1
 
     rc = verify(lay)
+    if rc and args.upgrade:
+        journal.rollback()
+        print("\n!! the upgraded machinery failed its own checks (above) — rolled back: every file is "
+              "as it was before this run, and the previous loop is still in place.")
+        return rc
     if provider:
         report_jev(lay, provider, jev_verdict, dry_run=False)
+    elif installed_already:
+        report_jev_state(lay)
+    report_customised(customised)
     report_wiring(lay)
 
     if args.seed_from_session:
@@ -637,6 +840,34 @@ NEXT — populate the queue from this session
 
     print("\nDone." if rc == 0 else "\nDone, with failures above.")
     return rc
+
+
+def wrote_settings(lay: Layout, merged: dict, verdict: str, provider: str | None,
+                   jev_merged: dict | None, jev_verdict: str, journal: Journal) -> None:
+    if merged and verdict != "already registered" and not verdict.startswith("UNPARSEABLE"):
+        write_settings(lay.root / ".claude" / "settings.json", merged, journal)
+        print(f"  .claude/settings.json ({verdict})")
+    elif verdict.startswith("UNPARSEABLE"):
+        print(f"  !! .claude/settings.json {verdict}")
+    if not provider:
+        return
+    if jev_verdict.startswith(("UNPARSEABLE", "REFUSED")):
+        print(f"  !! {LOCAL_SETTINGS} {jev_verdict}")
+    elif jev_verdict not in ("already registered", "not registered"):
+        if provider != "off":
+            ensure_local_exclude(lay.root, LOCAL_SETTINGS)
+        write_settings(lay.root / LOCAL_SETTINGS, jev_merged, journal, private=True)
+        print(f"  {LOCAL_SETTINGS} ({jev_verdict})")
+
+
+def report_customised(paths: list[str]) -> None:
+    if not paths:
+        return
+    print("\nKEPT AS YOU LEFT THEM — these generated files differ from every version this plugin has shipped,")
+    print("so they are your edits (a drain amends them on purpose) and were not overwritten:")
+    for path in paths:
+        print(f"  {path}")
+    print("To take the plugin's version of one, move it aside and re-run --upgrade.")
 
 
 def report_wiring(lay: Layout) -> None:

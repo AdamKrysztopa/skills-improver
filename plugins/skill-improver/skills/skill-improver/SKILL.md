@@ -218,6 +218,15 @@ Ask which one, unless the user already said:
 - **`--dry-run`** — print what would be created and where it would wire in,
   changing nothing.
 
+Also offer **Jev-assisted lesson detection** and say it is optional: Jev via
+OpenRouter, Jev via TypeSafe directly, or Off. Mark the provider whose API key is
+already available as (Recommended; `--dry-run --jev-provider <p>` reports whether a
+key is found), otherwise Off. An explicit choice is `--jev-provider
+openrouter|typesafe|off` — on an `--upgrade`, `off` is what removes the hooks.
+Omit the flag only when the user gave no answer, and never enable it without an
+explicit choice. How it works, where the key goes and what fails safely:
+`references/lessons-loop.md`.
+
 ### Step 2 — Run the installer
 
 ```bash

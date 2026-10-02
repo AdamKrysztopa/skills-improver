@@ -31,6 +31,10 @@ Three jobs:
    was actually running when the mistake happened. Paths adapt to the host
    project's conventions. `--seed-from-session` populates the queue from what
    went wrong in the current session, so the first drain is worth running.
+   Optionally, **Jev-assisted lesson detection** (`--jev-provider`) nudges Claude to
+   capture a lesson when a compact window of recent events looks lesson-worthy; Jev
+   only detects, Claude still writes the entry. Off by default, details in
+   [`references/lessons-loop.md`](plugins/skill-improver/skills/skill-improver/references/lessons-loop.md).
 
 Changes are always proposed for your confirmation before anything is written.
 

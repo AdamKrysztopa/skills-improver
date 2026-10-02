@@ -101,9 +101,11 @@ archive and checker are unchanged. It changes *when* capture is suggested, nothi
 
 - **Enable / disable:** `--jev-provider openrouter | typesafe | off` (with `--seed`,
   `--seed-from-session` or `--upgrade`). Off removes the hooks; nothing is sent anywhere.
-- **Consent lives in `.claude/settings.local.json`** (personal, git-ignored by Claude Code): three
-  hook registrations for `.claude/hooks/lesson_detect.py`. The script is committed and inert, so no
-  commit can turn external calls on for a teammate, and `--upgrade` never enables it by itself.
+- **Consent lives in `.claude/settings.local.json`** (personal): three hook registrations for
+  `.claude/hooks/lesson_detect.py`. The installer adds the file to this clone's `.git/info/exclude`,
+  writes no backup of it (it may hold a key), and refuses to register into a copy git tracks. The
+  script is committed and inert, so no commit can turn external calls on for a teammate, and
+  `--upgrade` never enables it by itself.
 - **Credential, never in config:** `OPENROUTER_API_KEY` or `TYPESAFE_API_KEY`, from the process
   environment (shell profile, or an `env` block in a Claude Code settings file) or a project `.env`
   (git-ignore it; the installer warns if it isn't). The installer reports whether the key was found

@@ -78,14 +78,13 @@ class CoreTests(unittest.TestCase):
         b = D.signature({"k": "fail", "err": "AssertionError: 9 != 10 in /var/y/b.py"})
         self.assertEqual(a, b)
 
-    def test_decide_threshold_dedupe_cooldown_cap(self):
+    def test_eligible_applies_dedupe_cooldown_and_cap(self):
         fresh = {"fired": [], "nudges": 0, "cooldown_until": 0}
-        self.assertIsNone(D.decide(0.59, "s", dict(fresh), now=0))
-        self.assertEqual(D.decide(0.61, "s", dict(fresh), now=0), "nudge")
-        self.assertIsNone(D.decide(0.9, "s", {**fresh, "fired": ["s"], "nudges": 1}, now=0))
-        self.assertIsNone(D.decide(0.9, "t", {**fresh, "nudges": 1, "cooldown_until": 100}, now=50))
-        self.assertEqual(D.decide(0.9, "t", {**fresh, "nudges": 1, "cooldown_until": 100}, now=150), "nudge")
-        self.assertIsNone(D.decide(0.9, "t", {**fresh, "nudges": D.MAX_NUDGES}, now=0))
+        self.assertTrue(D.eligible("s", dict(fresh), now=0))
+        self.assertFalse(D.eligible("s", {**fresh, "fired": ["s"], "nudges": 1}, now=0))
+        self.assertFalse(D.eligible("t", {**fresh, "nudges": 1, "cooldown_until": 100}, now=50))
+        self.assertTrue(D.eligible("t", {**fresh, "nudges": 1, "cooldown_until": 100}, now=150))
+        self.assertFalse(D.eligible("t", {**fresh, "nudges": D.MAX_NUDGES}, now=0))
 
     def test_mark_fired_records_signature_and_cooldown(self):
         st = {"fired": [], "nudges": 0, "cooldown_until": 0}
@@ -163,6 +162,7 @@ class IoTests(unittest.TestCase):
     def test_below_threshold_is_silent_above_nudges_once(self):
         t = FakeTransport(0.3)
         self.assertIsNone(self.run_hook("PostToolUseFailure", fail_payload(), t))
+        self.assertEqual(len(t.bodies), 1)
         t = FakeTransport(0.8)
         out = self.run_hook("PostToolUseFailure", fail_payload(cmd="pytest b", err="Exit code 1\nKeyError: 'tenant_id'"), t)
         self.assertIn("`lessons` skill", self.seen(out))
@@ -207,7 +207,48 @@ class IoTests(unittest.TestCase):
             self.run_hook("PostToolUseFailure", fail_payload(sid="s2", err="Exit code 1\n%s" % ("x" * i)), t2)
         self.assertEqual(len(t2.bodies), D.MAX_CALLS)
 
+    def test_calls_that_cannot_nudge_do_not_spend_the_budget(self):
+        t = FakeTransport(0.9)
+        same = fail_payload(err="Exit code 1\nthe same failure")
+        for i in range(D.MAX_CALLS):
+            self.run_hook("PostToolUseFailure", same, t, now=self.now + i)
+        self.assertEqual(len(t.bodies), 1)
+        later = self.run_hook("PostToolUseFailure", fail_payload(err="Exit code 1\na different problem"), t,
+                              now=self.now + D.COOLDOWN_S + 60)
+        self.assertIn("`lessons` skill", self.seen(later))
+        self.assertEqual(len(t.bodies), 2)
+
+    def test_events_during_cooldown_are_still_recorded_for_the_next_call(self):
+        t = FakeTransport(0.9)
+        self.run_hook("PostToolUseFailure", fail_payload(err="Exit code 1\nfirst"), t, now=self.now)
+        self.run_hook("PostToolUseFailure", fail_payload(err="Exit code 1\nsecond"), t, now=self.now + 5)
+        self.assertEqual(len(t.bodies), 1)
+        self.run_hook("PostToolUseFailure", fail_payload(err="Exit code 1\nthird"), t, now=self.now + D.COOLDOWN_S + 1)
+        errs = [e.get("err", "") for e in t.bodies[1]["state"]["events"]]
+        self.assertTrue(any("second" in e for e in errs))
+
     # --- privacy ---------------------------------------------------------------
+    def test_structured_and_quoted_credentials_never_reach_state_or_request(self):
+        secrets = ("demo-secret-42", "secret with spaces", "hunter2-hunter2")
+        cases = (
+            ("curl -d '{\"password\": \"demo-secret-42\"}' https://x", "Exit code 1\nboom"),
+            ("python app.py", "Exit code 1\nAPI_KEY = demo-secret-42 rejected"),
+            ("PASSWORD='secret with spaces' ./run.sh", "Exit code 1\nboom"),
+            ("deploy", 'Exit code 1\n{"client_secret":"hunter2-hunter2","ok":false}'),
+        )
+        t = FakeTransport(0.1)
+        for i, (cmd, err) in enumerate(cases):
+            self.run_hook("PostToolUseFailure", fail_payload(cmd=cmd, err=err, sid="sx"), t, now=self.now + i)
+        self.run_hook("UserPromptSubmit", {"session_id": "sx", "prompt": "my token: demo-secret-42 and PASSWORD=\"secret with spaces\""}, t)
+        stored = "".join(f.read_text() for f in self.state_dir.glob("*.json"))
+        for secret in secrets:
+            self.assertNotIn(secret, stored)
+            self.assertNotIn(secret, json.dumps(t.bodies))
+
+    def test_redaction_keeps_ordinary_error_text_readable(self):
+        out = D.redact("KeyError: 'tenant_id' while loading monkeypatch fixtures; keyboard interrupt", 200)
+        self.assertEqual(out, "KeyError: 'tenant_id' while loading monkeypatch fixtures; keyboard interrupt")
+
     def test_the_actual_key_never_leaves_even_if_it_appears_in_a_command(self):
         t = FakeTransport(0.1)
         self.run_hook("PostToolUseFailure", fail_payload(cmd="echo " + KEY, err="Exit code 1\nbad " + KEY), t)

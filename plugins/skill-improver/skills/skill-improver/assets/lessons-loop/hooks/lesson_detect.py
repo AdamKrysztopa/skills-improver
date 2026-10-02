@@ -49,7 +49,11 @@ QUESTION = (
 )
 
 _SECRET = re.compile(
-    r"(?i)(bearer\s+\S+|\b[A-Z0-9_]*(KEY|TOKEN|SECRET|PASSWORD)[A-Z0-9_]*=\S+|\b[A-Za-z0-9+/]{32,}={0,2}\b)"
+    r"""(?ix)
+      (?:bearer|basic)\s+\S+
+    | ["']?\b[\w-]*(?:key|token|secret|passw(?:or)?d|pwd)["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;&]+)
+    | \b[A-Za-z0-9+/]{32,}={0,2}\b
+    """
 )
 _EDIT_TOOLS = ("Edit", "Write", "MultiEdit")
 
@@ -138,13 +142,9 @@ def build_body(model: str, window: list[dict], trigger: str) -> dict:
     }
 
 
-def decide(score: float, sig: str, state: dict, *, now: float) -> str | None:
-    """Return "nudge" when the score is high enough and not a repeat, else None."""
-    if score < WORTHY_MIN or sig in state["fired"]:
-        return None
-    if state["nudges"] >= MAX_NUDGES or now < state["cooldown_until"]:
-        return None
-    return "nudge"
+def eligible(sig: str, state: dict, *, now: float) -> bool:
+    """True when a nudge for this problem could still be emitted: not a repeat, not cooling, under the cap."""
+    return sig not in state["fired"] and state["nudges"] < MAX_NUDGES and now >= state["cooldown_until"]
 
 
 def mark_fired(state: dict, sig: str, *, now: float) -> None:
@@ -345,6 +345,9 @@ def _judge(event: str, ev: dict, state: dict, provider: str, key: str, path: Pat
         state["paused_until"], state["errs"] = now + PAUSE_S, 0
     if state["blocked"] or now < state["paused_until"] or state["calls"] >= MAX_CALLS:
         return None
+    sig = signature(ev)
+    if not eligible(sig, state, now=now):
+        return None
     state["calls"] += 1
     state["errs"] += 1  # cleared on success, so a hook killed mid-call still counts toward the pause
     if not _save(path, state):
@@ -355,8 +358,7 @@ def _judge(event: str, ev: dict, state: dict, provider: str, key: str, path: Pat
     except JevError as exc:
         return _on_error(exc, event, provider, state, now)
     state["errs"] = 0
-    sig = signature(ev)
-    if decide(score, sig, state, now=now) is None:
+    if score < WORTHY_MIN:
         return None
     mark_fired(state, sig, now=now)
     return _context(event, nudge_text(ev["k"], len(state["window"])))

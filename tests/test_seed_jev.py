@@ -47,7 +47,9 @@ class SeedJevTests(unittest.TestCase):
 
     def seed(self, *args, env=None):
         out = io.StringIO()
-        with mock.patch.dict(os.environ, {**NO_KEYS, **(env or {})}), contextlib.redirect_stdout(out):
+        # an empty global git config: the host machine's own ignore rules must not mask the guarantees
+        isolated = {"GIT_CONFIG_GLOBAL": os.devnull, "XDG_CONFIG_HOME": str(self.root.parent / "no-xdg")}
+        with mock.patch.dict(os.environ, {**isolated, **NO_KEYS, **(env or {})}), contextlib.redirect_stdout(out):
             rc = S.main(["--root", str(self.root), *args])
         return rc, out.getvalue()
 
@@ -99,6 +101,41 @@ class SeedJevTests(unittest.TestCase):
         cmd = self.read_local()["hooks"]["PostToolUseFailure"][0]["hooks"][0]["command"]
         self.assertTrue(cmd.endswith("lesson_detect.py\" typesafe || true"))
         self.probe.assert_called_once_with("typesafe", KEY)
+
+    def git(self, *args):
+        env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "XDG_CONFIG_HOME": str(self.root.parent / "no-xdg")}
+        return subprocess.run(["git", *args], cwd=self.root, env=env, capture_output=True, text=True).stdout
+
+    def test_the_personal_settings_file_is_ignored_locally_before_it_is_written(self):
+        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+        rc, out = self.seed("--seed", "--jev-provider", "openrouter")
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("settings.local.json", self.git("ls-files", "--others", "--exclude-standard"))
+        self.assertIn("settings.local.json", (self.root / ".git/info/exclude").read_text())
+
+    def test_a_tracked_personal_settings_file_is_never_registered_into(self):
+        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+        (self.root / ".claude").mkdir()
+        (self.root / LOCAL).write_text("{}")
+        subprocess.run(["git", "add", "-f", LOCAL], cwd=self.root, check=True)
+        rc, out = self.seed("--seed", "--jev-provider", "openrouter")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual((self.root / LOCAL).read_text(), "{}")
+        self.assertIn("tracked by git", out)
+        self.assertTrue((self.root / "docs/lessons.md").exists())
+
+    def test_enabling_switching_and_disabling_never_copy_a_credential_into_a_backup(self):
+        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+        (self.root / ".claude").mkdir()
+        (self.root / LOCAL).write_text(json.dumps({"env": {"OPENROUTER_API_KEY": KEY}}))
+        self.seed("--seed", "--jev-provider", "openrouter")
+        self.seed("--upgrade", "--jev-provider", "typesafe")
+        self.seed("--upgrade", "--jev-provider", "off")
+        holders = [str(f.relative_to(self.root)) for f in self.root.rglob("*")
+                   if f.is_file() and ".git/" not in str(f) and KEY in f.read_text(errors="replace")]
+        self.assertEqual(holders, [LOCAL])
+        self.assertEqual(self.read_local()["env"], {"OPENROUTER_API_KEY": KEY})
+        self.assertEqual(self.git("ls-files", "--others", "--exclude-standard").count("settings.local"), 0)
 
     def test_a_missing_script_can_never_block_a_prompt_or_tool_call(self):
         self.seed("--seed", "--jev-provider", "openrouter")

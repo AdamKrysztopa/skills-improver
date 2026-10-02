@@ -208,12 +208,15 @@ def settings_action(lay: Layout) -> tuple[str, dict]:
     return (verb, settings)
 
 
-def write_settings(path: Path, merged: dict) -> None:
-    """Write a settings file, keeping a .bak of whatever was there."""
+def write_settings(path: Path, merged: dict, *, backup: bool = True, private: bool = False) -> None:
+    """Write a settings file, keeping a .bak of whatever was there unless it may hold credentials."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
+    existed = path.exists()
+    if existed and backup:
         shutil.copy2(path, path.with_suffix(path.suffix + ".bak"))
     path.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
+    if private and not existed:
+        path.chmod(0o600)
 
 
 # --- Jev-assisted lesson detection -------------------------------------------
@@ -305,6 +308,9 @@ def jev_settings_action(lay: Layout, provider: str) -> tuple[str, dict]:
     except (OSError, ValueError) as exc:
         return (f"UNPARSEABLE ({exc}) — register the Jev hooks by hand", {})
 
+    if provider != "off" and is_tracked(lay.root, LOCAL_SETTINGS):
+        return ("REFUSED (tracked by git — a registration here would be shared with teammates; "
+                "untrack the file or register by hand)", {})
     command = jev_command(lay, provider)
     if provider != "off" and _is_registered(hooks, command):
         return ("already registered", settings)
@@ -322,6 +328,35 @@ def jev_settings_action(lay: Layout, provider: str) -> tuple[str, dict]:
     return (f"register Jev hooks ({provider})", settings)
 
 
+def _git(root: Path, *args: str) -> subprocess.CompletedProcess | None:
+    try:
+        return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True)
+    except OSError:
+        return None
+
+
+def is_tracked(root: Path, rel: str) -> bool:
+    proc = _git(root, "ls-files", "--error-unmatch", rel)
+    return proc is not None and proc.returncode == 0
+
+
+def ensure_local_exclude(root: Path, rel: str) -> None:
+    """Keep `rel` out of commits via this clone's .git/info/exclude, unless git already ignores it.
+
+    Claude Code only excludes settings.local.json when it writes the file itself; ours is written here.
+    """
+    proc = _git(root, "check-ignore", "-q", rel)
+    if proc is None or proc.returncode != 1:
+        return
+    where = _git(root, "rev-parse", "--git-path", "info/exclude")
+    if where is None or where.returncode != 0:
+        return
+    exclude = root / where.stdout.strip()
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    with exclude.open("a", encoding="utf-8") as handle:
+        handle.write(rel + "\n")
+
+
 def dotenv_unignored(root: Path) -> bool:
     """True when a project `.env` exists inside a git repo that does not ignore it."""
     if not (root / ".env").is_file():
@@ -331,6 +366,16 @@ def dotenv_unignored(root: Path) -> bool:
     except OSError:
         return False
     return proc.returncode == 1
+
+
+def report_jev(lay: Layout, provider: str, verdict: str, *, dry_run: bool) -> None:
+    """The Jev report, or a plain statement that it could not be enabled."""
+    if verdict.startswith(("UNPARSEABLE", "REFUSED")):
+        if provider != "off":
+            print("\nJev-assisted lesson detection is NOT enabled (see above). "
+                  "The base lessons loop is installed and unaffected.")
+        return
+    jev_report(lay, provider, dry_run=dry_run)
 
 
 def jev_report(lay: Layout, provider: str, *, dry_run: bool) -> None:
@@ -544,7 +589,7 @@ def main(argv: list[str]) -> int:
 
     if args.dry_run:
         if provider:
-            jev_report(lay, provider, dry_run=True)
+            report_jev(lay, provider, jev_verdict, dry_run=True)
         report_wiring(lay)
         print("\n--dry-run: nothing was written.")
         return 0
@@ -563,15 +608,17 @@ def main(argv: list[str]) -> int:
     elif verdict.startswith("UNPARSEABLE"):
         print(f"  !! .claude/settings.json {verdict}")
     if provider:
-        if jev_verdict.startswith("UNPARSEABLE"):
+        if jev_verdict.startswith(("UNPARSEABLE", "REFUSED")):
             print(f"  !! {LOCAL_SETTINGS} {jev_verdict}")
         elif jev_verdict not in ("already registered", "not registered"):
-            write_settings(lay.root / LOCAL_SETTINGS, jev_merged)
+            if provider != "off":
+                ensure_local_exclude(lay.root, LOCAL_SETTINGS)
+            write_settings(lay.root / LOCAL_SETTINGS, jev_merged, backup=False, private=True)
             print(f"  {LOCAL_SETTINGS} ({jev_verdict})")
 
     rc = verify(lay)
-    if provider and not (provider == "off" and jev_verdict.startswith("UNPARSEABLE")):
-        jev_report(lay, provider, dry_run=False)
+    if provider:
+        report_jev(lay, provider, jev_verdict, dry_run=False)
     report_wiring(lay)
 
     if args.seed_from_session:

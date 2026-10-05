@@ -15,7 +15,6 @@ nudge and queue write is appended there, and nothing else about the hook's behav
 
 from __future__ import annotations
 
-import contextlib
 import http.client
 import json
 import os
@@ -28,11 +27,6 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-try:
-    import fcntl
-except ImportError:
-    fcntl = None
-
 PROVIDERS = {
     "openrouter": ("https://openrouter.ai/api/v1/systemone", "jev-1.13", "OPENROUTER_API_KEY"),
     "typesafe": ("https://api.typesafe.ai/v1/systemone", "jev-1.13.0", "TYPESAFE_API_KEY"),
@@ -44,7 +38,6 @@ COOLDOWN_S = 600
 MAX_NUDGES = 3
 MAX_CALLS = 30
 TIMEOUT_S = 2.0
-LOCK_TIMEOUT_S = 0.5
 STATE_TTL_S = 86400
 PAUSE_S = 1800
 STATE_VERSION = 1
@@ -279,7 +272,7 @@ def call_jev(provider: str, key: str, body: dict, *, timeout: float = TIMEOUT_S,
 def new_state() -> dict:
     """An empty per-session state."""
     return {"v": STATE_VERSION, "window": [], "fired": [], "nudges": 0, "cooldown_until": 0,
-            "calls": 0, "errs": 0, "paused_until": 0, "blocked": False, "last": None, "project": ""}
+            "calls": 0, "errs": 0, "paused_until": 0, "blocked": False}
 
 
 def load_state(path: Path, *, now: float) -> dict:
@@ -309,47 +302,13 @@ def save_state(path: Path, state: dict) -> None:
         raise
 
 
-@contextlib.contextmanager
-def locked(path: Path, *, timeout: float = LOCK_TIMEOUT_S):
-    """Serialise one read-modify-write of `path` across parallel hooks. Yields False on timeout.
-
-    Without fcntl (Windows) this yields True unlocked: v1.3.1 behaviour, at worst one lost event.
-    """
-    if fcntl is None:
-        yield True
-        return
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        fd = os.open(str(path.with_suffix(".lock")), os.O_RDWR | os.O_CREAT, 0o600)
-    except OSError:
-        yield False
-        return
-    try:
-        deadline = time.monotonic() + timeout
-        while True:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                if time.monotonic() >= deadline:
-                    yield False
-                    return
-                time.sleep(0.01)
-        try:
-            yield True
-        finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-    finally:
-        os.close(fd)
-
-
 def default_state_dir() -> Path:
     """Per-user temp directory: never in the repo, reaped by the OS."""
     return Path(tempfile.gettempdir()) / ("skill-improver-jev-%d" % getattr(os, "getuid", lambda: 0)())
 
 
 def _sweep(state_dir: Path, now: float) -> None:
-    for old in (*state_dir.glob("*.json"), *state_dir.glob("*.lock")):
+    for old in state_dir.glob("*.json"):
         try:
             if now - old.stat().st_mtime > STATE_TTL_S:
                 old.unlink()
@@ -423,32 +382,29 @@ def _save(path: Path, state: dict) -> bool:
     return True
 
 
-def _reserve(ev: dict, state: dict, now: float) -> bool:
-    """Under the lock: claim one call from the budget, or say no."""
+def _judge(event: str, ev: dict, state: dict, provider: str, key: str, path: Path,
+           now: float, transport, log=_noop) -> dict | None:
     if state["errs"] >= 3:
         state["paused_until"], state["errs"] = now + PAUSE_S, 0
     if state["blocked"] or now < state["paused_until"] or state["calls"] >= MAX_CALLS:
-        return False
-    if not eligible(signature(ev), state, now=now):
-        return False
+        return None
+    sig = signature(ev)
+    if not eligible(sig, state, now=now):
+        return None
     state["calls"] += 1
     state["errs"] += 1  # cleared on success, so a hook killed mid-call still counts toward the pause
-    return True
-
-
-def _settle(event: str, ev: dict, state: dict, provider: str, score: float | None,
-            exc: JevError | None, now: float, log=_noop) -> dict | None:
-    """Under the lock, on freshly re-read state: record the outcome and decide the nudge."""
-    if exc is not None:
-        state["last"] = {"t": int(now), "outcome": "error:" + exc.kind}
+    if not _save(path, state):
+        return None
+    body = build_body(PROVIDERS[provider][1], state["window"], ev["k"])
+    try:
+        score = transport(provider, key, body)
+    except JevError as exc:
         log({"e": "call", "trigger": ev["k"], "outcome": "error:" + exc.kind})
         return _on_error(exc, event, provider, state, now)
     state["errs"] = 0
-    outcome = "positive" if score >= WORTHY_MIN else "negative"
-    state["last"] = {"t": int(now), "outcome": outcome}
-    log({"e": "call", "trigger": ev["k"], "score": round(score, 3), "outcome": outcome})
-    sig = signature(ev)
-    if score < WORTHY_MIN or not eligible(sig, state, now=now):
+    log({"e": "call", "trigger": ev["k"], "score": round(score, 3),
+         "outcome": "positive" if score >= WORTHY_MIN else "negative"})
+    if score < WORTHY_MIN:
         return None
     mark_fired(state, sig, now=now)
     log({"e": "nudge", "trigger": ev["k"], "events": len(state["window"])})
@@ -480,31 +436,17 @@ def run(event: str, payload: dict, provider: str, *, env: dict, project_dir: Pat
     ev = _scrub(ev, key)
     session = re.sub(r"[^\w.-]", "_", str(payload.get("session_id") or "nosession"))[:64]
     path = state_dir / (session + ".json")
-    with locked(path) as ok:
-        if not ok:
-            return None
-        state = load_state(path, now=now)
-        state["project"] = state["project"] or str(Path(project_dir).resolve())
-        state["window"] = push(state["window"], ev)
-        call = ev["k"] in ("fail", "prompt") and _reserve(ev, state, now)
-        if not _save(path, state):
-            return None
-        window = list(state["window"])
+    state = load_state(path, now=now)
+    state["window"] = push(state["window"], ev)
+    if not _save(path, state):
+        return None
     log = eval_logger(env, project_dir, session[:36], now)
     if ev["k"] == "edit" and os.path.basename(ev["key"]) == "lessons.md":
         log({"e": "queue_write", "titles": queue_titles(payload["tool_input"])})
     out = None
-    if call:
-        score, exc = None, None
-        try:
-            score = transport(provider, key, build_body(PROVIDERS[provider][1], window, ev["k"]))
-        except JevError as caught:
-            exc = caught
-        with locked(path) as ok:
-            if ok:
-                state = load_state(path, now=now)
-                out = _settle(event, ev, state, provider, score, exc, now, log)
-                _save(path, state)
+    if ev["k"] in ("fail", "prompt"):
+        out = _judge(event, ev, state, provider, key, path, now, transport, log)
+        _save(path, state)
     _sweep(state_dir, now)
     return out
 

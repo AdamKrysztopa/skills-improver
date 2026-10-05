@@ -235,7 +235,8 @@ def planned_files(lay: Layout, empty_queue: bool, *, with_jev: bool = False) -> 
     if with_jev:
         files.append({"dest": lay.detector, "src": "hooks/lesson_detect.py", "kind": "code",
                       "role": "Jev-assisted detection — Jev scores, Claude still writes the lesson",
-                      "legacy": ["legacy/hooks/lesson_detect.v1.3.0.py"]})
+                      "legacy": ["legacy/hooks/lesson_detect.v1.3.0.py",
+                                 "legacy/hooks/lesson_detect.v1.3.1.py"]})
     return files
 
 

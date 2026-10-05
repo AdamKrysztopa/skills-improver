@@ -111,6 +111,17 @@ class LayoutError(Exception):
     """The installed hook points somewhere the installer cannot reproduce."""
 
 
+def contained(root: Path, rel: str, what: str) -> str:
+    """`rel` as a normalised project-relative path; LayoutError if it lands outside `root`."""
+    norm = posixpath.normpath(rel.replace("\\", "/"))
+    target = (root / norm).resolve()
+    if posixpath.isabs(norm) or not target.is_relative_to(root):
+        raise LayoutError(
+            f"{what} {rel!r} resolves to {target}, outside the project {root}. Nothing was written. "
+            "Pass --docs-dir / --scripts-dir / --tests-dir with a directory inside the project.")
+    return norm
+
+
 def recover_layout(root: Path, args) -> dict:
     """Read an existing install's layout back from its own SessionStart hook.
 
@@ -159,6 +170,9 @@ def detect_layout(args) -> Layout:
     else:
         tests_base = first_existing(root, TEST_DIR_CANDIDATES, "")
         tests = f"{tests_base}/lessons_loop" if tests_base else f"{scripts}/lessons_loop_tests"
+    docs = contained(root, docs, "docs directory")
+    scripts = contained(root, scripts, "scripts directory")
+    tests = contained(root, tests, "tests directory")
     lay = Layout(root, docs, scripts, ".claude/hooks", ".claude/skills", tests)
     lay.recovered = bool(known)
     return lay
@@ -728,6 +742,12 @@ def main(argv: list[str]) -> int:
     provider = args.jev_provider
     wants_jev = provider in JEV_PROVIDERS or (args.upgrade and (lay.root / lay.detector).exists())
     files = planned_files(lay, empty_queue=args.seed_from_session, with_jev=wants_jev)
+    try:
+        for f in files:
+            contained(lay.root, f["dest"], "destination")
+    except LayoutError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     present = [f for f in files if (lay.root / f["dest"]).exists()]
     installed_already = any(f["kind"] == "code" for f in present)
 

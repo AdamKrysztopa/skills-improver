@@ -257,6 +257,10 @@ existing `tests/`) and retargets every path inside the scripts, skills and prose
 archive. Don't route around it by deleting files first — a half-migrated loop
 that silently drops the archive is the worst outcome this feature can produce.
 
+**Exit 3 means the files are installed but the SessionStart hook is not registered** —
+show the user the printed line to add to `.claude/settings.json`; do not report success.
+Exit 1 after a fresh seed means its own checks failed and everything it wrote was rolled back.
+
 The installer finishes by running the checker against a deliberately broken
 fixture, triggering the hook and printing what it injects, and running the loop's
 test suite. **Read that output and pass it on** — a hook is code, and a green

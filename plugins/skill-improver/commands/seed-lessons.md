@@ -16,3 +16,6 @@ means `--dry-run`. Also offer the optional Jev-assisted lesson detection (Workfl
 `EXISTING LOOP DETECTED` (a project seeded by an earlier version), this is an upgrade — offer
 `--upgrade` plus the separate Jev choice (OpenRouter / TypeSafe / Off, never enabled unasked), and
 never delete or reseed. The queue and archive are never touched.
+
+Exit 3 means the files are installed but the SessionStart hook is not registered — show the user the
+printed line to add to `.claude/settings.json`; do not report success.

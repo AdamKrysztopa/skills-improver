@@ -366,6 +366,17 @@ def settings_action(lay: Layout) -> tuple[str, dict]:
     return (verb, settings)
 
 
+def registered(lay: Layout) -> bool:
+    """True when .claude/settings.json actually registers this loop's SessionStart hook."""
+    try:
+        settings = json.loads((lay.root / ".claude" / "settings.json").read_text(encoding="utf-8"))
+        check_hooks_shape(settings)
+    except (OSError, ValueError):
+        return False
+    return any("session_start_lessons.py" in str(h.get("command", ""))
+               for g in settings.get("hooks", {}).get("SessionStart", []) for h in g.get("hooks", []))
+
+
 def write_settings(path: Path, merged: dict, journal: Journal, *, private: bool = False) -> None:
     """Write a settings file through the journal.
 
@@ -873,10 +884,14 @@ def main(argv: list[str]) -> int:
         return 1
 
     rc = verify(lay)
-    if rc and args.upgrade:
+    if rc:
         journal.rollback()
-        print("\n!! the upgraded machinery failed its own checks (above) — rolled back: every file is "
-              "as it was before this run, and the previous loop is still in place.")
+        if args.upgrade:
+            print("\n!! the upgraded machinery failed its own checks (above) — rolled back: every file is "
+                  "as it was before this run, and the previous loop is still in place.")
+        else:
+            print("\n!! the new machinery failed its own checks (above) — rolled back: nothing this run "
+                  "created is left behind.")
         return rc
     if provider:
         report_jev(lay, provider, jev_verdict, dry_run=False)
@@ -899,8 +914,14 @@ NEXT — populate the queue from this session
   `Candidate home` (a suggestion, not a decision). Do not implement any of them:
   routing happens at the drain, where they can be grouped.""")
 
-    print("\nDone." if rc == 0 else "\nDone, with failures above.")
-    return rc
+    if not registered(lay):
+        print(f"""
+INSTALLED, NOT WIRED — Claude Code will not run the loop until .claude/settings.json registers:
+  {hook_command(lay)}
+under hooks.SessionStart. Add it by hand, then re-run --upgrade to confirm.""")
+        return 3
+    print("\nDone.")
+    return 0
 
 
 def wrote_settings(lay: Layout, merged: dict, verdict: str, provider: str | None,

@@ -133,8 +133,9 @@ archive and checker are unchanged. It changes *when* capture is suggested, nothi
   environment (shell profile, or an `env` block in a Claude Code settings file) or a project `.env`
   (git-ignore it; the installer warns if it isn't). The installer reports whether the key was found
   and makes one connectivity call; a missing or bad key never fails the install.
-- **What it sends:** at most the last 8 events — truncated, secret-shaped values redacted, paths
-  relative; no file contents, no transcript. This is an external inference call. Per-session state
+- **What it sends:** bounded, redacted event snippets, never the transcript or file contents: at
+  most the last 8 events, truncated, secret-shaped values redacted, paths relative. Redaction is
+  best-effort regex, not DLP. This is an external inference call. Per-session state
   lives in the OS temp dir, not the repo.
 - **Failure:** the hook always exits 0. No key, timeouts, 429s, malformed replies: silent no-op
   (three transient failures in a row pause calls for 30 minutes). A key that is present but out of

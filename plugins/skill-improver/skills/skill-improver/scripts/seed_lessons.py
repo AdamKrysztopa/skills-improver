@@ -324,12 +324,29 @@ def hook_command(lay: Layout) -> str:
     return f'python3 "$CLAUDE_PROJECT_DIR/{lay.hook}"'
 
 
+def check_hooks_shape(settings: object) -> None:
+    """Raise ValueError unless settings has the shape Claude Code documents for hooks."""
+    if not isinstance(settings, dict):
+        raise ValueError("top level is not a JSON object")
+    hooks = settings.get("hooks", {})
+    if not isinstance(hooks, dict):
+        raise ValueError('"hooks" is not an object')
+    for event, groups in hooks.items():
+        if not isinstance(groups, list):
+            raise ValueError(f'"hooks.{event}" is not a list')
+        for i, group in enumerate(groups):
+            inner = group.get("hooks", []) if isinstance(group, dict) else None
+            if not isinstance(inner, list) or not all(isinstance(h, dict) for h in inner):
+                raise ValueError(f'"hooks.{event}[{i}]" is not a hook group')
+
+
 def settings_action(lay: Layout) -> tuple[str, dict]:
     """Return (verdict, merged-settings) without writing anything."""
     path = lay.root / ".claude" / "settings.json"
     try:
         settings = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-    except (OSError, json.JSONDecodeError) as exc:
+        check_hooks_shape(settings)
+    except (OSError, ValueError) as exc:
         return (f"UNPARSEABLE ({exc}) — register the hook by hand", {})
 
     starts = settings.setdefault("hooks", {}).setdefault("SessionStart", [])
@@ -437,10 +454,8 @@ def jev_settings_action(lay: Layout, provider: str) -> tuple[str, dict]:
     path = lay.root / LOCAL_SETTINGS
     try:
         settings = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-        if not isinstance(settings, dict):
-            raise ValueError("not a JSON object")
-        hooks = settings.get("hooks", {})
-        hooks = settings["hooks"] = hooks if isinstance(hooks, dict) else {}
+        check_hooks_shape(settings)
+        hooks = settings.setdefault("hooks", {})
     except (OSError, ValueError) as exc:
         return (f"UNPARSEABLE ({exc}) — register the Jev hooks by hand", {})
 

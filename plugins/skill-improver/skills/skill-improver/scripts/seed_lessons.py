@@ -438,7 +438,7 @@ def _strip_detector(hooks: dict) -> None:
 
 def _is_registered(hooks: dict, command: str) -> bool:
     for event, matcher in JEV_EVENTS:
-        found = any(g.get("matcher") == matcher and any(h.get("command") == command for h in g["hooks"])
+        found = any(g.get("matcher") == matcher and any(h.get("command") == command for h in g.get("hooks", []))
                     for g in hooks.get(event, []))
         if not found:
             return False

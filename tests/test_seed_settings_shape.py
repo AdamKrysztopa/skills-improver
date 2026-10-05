@@ -52,6 +52,19 @@ class SettingsShape(unittest.TestCase):
         self.assertTrue(verdict.startswith("UNPARSEABLE"), verdict)
         self.assertEqual(merged, {})
 
+    def test_hook_groups_without_a_hooks_list_do_not_crash_jev_registration(self):
+        shapes = [
+            {"hooks": {"PostToolUse": [{"matcher": "Bash|Edit|Write|MultiEdit"}]}},
+            {"hooks": {"UserPromptSubmit": [{}]}},
+        ]
+        for settings in shapes:
+            with self.subTest(settings):
+                path = self.root / ".claude/settings.local.json"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(settings))
+                lay = S.Layout(self.root, "docs", "scripts", ".claude/hooks", ".claude/skills", "tests/lessons_loop")
+                S.jev_settings_action(lay, "openrouter")
+
 
 if __name__ == "__main__":
     unittest.main()

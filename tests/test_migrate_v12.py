@@ -58,7 +58,7 @@ USER_ARCHIVE_SECTION = """
 
 def snapshot(root: Path) -> dict:
     return {str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*"))
-            if p.is_file() and ".git" not in p.relative_to(root).parts}
+            if p.is_file() and not {".git", "__pycache__"} & set(p.relative_to(root).parts)}
 
 
 class MigrationBase(unittest.TestCase):
@@ -161,6 +161,17 @@ class MigrationBase(unittest.TestCase):
             if rel not in data:
                 self.assertEqual(migrated.get(rel), content, rel)
         self.assertEqual(set(migrated) - set(pristine), set())
+
+
+class InstallLeavesNoBytecode(MigrationBase):
+    def test_a_fresh_seed_writes_no_pycache_anywhere_in_the_project(self):
+        env = {k: v for k, v in self.env().items() if k != "PYTHONDONTWRITEBYTECODE"}
+        env.pop("PYTHONPYCACHEPREFIX", None)
+        proc = subprocess.run([sys.executable, str(SKILL / "scripts" / "seed_lessons.py"),
+                               "--root", str(self.root), "--seed"],
+                              env=env, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual([str(p) for p in self.root.rglob("__pycache__")], [])
 
 
 class SnapshotIsGenuine(unittest.TestCase):

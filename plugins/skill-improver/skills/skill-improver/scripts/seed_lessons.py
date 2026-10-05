@@ -692,7 +692,8 @@ def install(lay: Layout, files: list[dict], upgrade: bool, journal: Journal,
 def verify(lay: Layout) -> int:
     """Run the machinery and show what it prints. A hook is code, not a claim."""
     root = lay.root
-    env = {**os.environ, "CLAUDE_PROJECT_DIR": str(root)}
+    env = {**os.environ, "CLAUDE_PROJECT_DIR": str(root),
+           "PYTHONDONTWRITEBYTECODE": "1"}
     rc = 0
 
     print("\n--- the checker, against the seeded-defect fixture "

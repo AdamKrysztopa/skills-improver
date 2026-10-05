@@ -31,6 +31,28 @@ QUEUE_REL = "docs/lessons.md"
 
 MAX_QUEUE_TITLES = 12
 
+_DOC_SUFFIXES = (".md", ".rst", ".txt", ".adoc")
+_GATE_DIRS = (".claude/hooks/", ".git/hooks/", ".github/workflows/")
+_GATE_FILES = {"makefile", "justfile", "noxfile.py", "tox.ini", "conftest.py", ".pre-commit-config.yaml"}
+
+
+def enforced(home: str) -> bool:
+    """True only for a single path that a hook, a test or a CI gate runs without anyone remembering.
+
+    Deliberately narrower than `lessons_graph.home_rank`, whose substring match also catches
+    `src/webhooks/retry.py` and `docs/hooks.rst`. A rule wrongly hidden is lost; a rule wrongly
+    injected only costs a line.
+    """
+    h = home.strip().strip("`").strip().lower()
+    if not h or "," in h or any(c.isspace() for c in h) or h.endswith(_DOC_SUFFIXES):
+        return False
+    parts = h.split("/")
+    name = parts[-1]
+    return (h.startswith(_GATE_DIRS) or "/.github/workflows/" in h
+            or name.startswith("test_") or name.endswith("_test.py")
+            or "tests" in parts or "test" in parts
+            or name in _GATE_FILES)
+
 
 def project_root() -> Path:
     """Locate the project root by looking for the ledger, not by counting `..`."""
@@ -59,12 +81,8 @@ def build_context() -> str:
                if k in ("supersedes", "reverses", "moves")}
     live = [e for e in entries if not e.declined and e.id not in retired]
 
-    def enforced(e) -> bool:
-        home = e.home.strip("` ")
-        return lg.home_rank(home) in ("hook", "gate") and not home.endswith(".md")
-
-    advisory = [e for e in live if not enforced(e)]
-    mechanical = [e for e in live if enforced(e)]
+    advisory = [e for e in live if not enforced(e.home)]
+    mechanical = [e for e in live if enforced(e.home)]
 
     if not live and not titles:
         return ""
@@ -83,7 +101,8 @@ def build_context() -> str:
         out.append("")
     if mechanical:
         out.append(
-            f"{len(mechanical)} more applied rule(s) are enforced by a hook or a test, so they are not "
+            f"{len(mechanical)}{' more' if advisory else ''} applied rule(s) are enforced by a hook, test "
+            f"or CI gate, so they are not "
             f"restated here: {', '.join(e.id for e in mechanical)}. If one of those checks fires, "
             f"its row in `{ARCHIVE_REL}` says why it exists."
         )

@@ -212,6 +212,39 @@ check("test-enforced rule is not restated", "Dates are parsed with the project h
 check("enforced rules are still named by id", "L1.1" in ctx and "L1.2" in ctx, ctx)
 check("markdown home with 'hook' in its name stays injected", "Hooks guide wording stays current." in ctx, ctx)
 
+STAYS = [
+    ("src/webhooks/retry.py", "Retries back off exponentially."),
+    ("docs/hooks.rst", "Hook docs name the event."),
+    ("docs/HOOKS.MD", "Hook guide stays current."),
+    ("src/cities/map.py", "City keys are lowercase."),
+    ("app/latest_report.py", "Reports sort newest first."),
+    ("`CLAUDE.md`, `.claude/hooks/x.py`", "Two homes means a human still reads it."),
+]
+GATES = [
+    (".github/workflows/ci.yml", "CI runs the linter."),
+    ("tests/helpers/dates.py", "Helpers live under tests."),
+    ("scripts/parse_test.py", "Parsers have a test."),
+    ("Makefile", "Make target gates the build."),
+]
+rows = "".join(f"| L2.{i} | {rule} | `{home}` | bbb2222 | — |\n"
+               for i, (home, rule) in enumerate(STAYS + GATES, 1))
+root = make_project(
+    "# Lessons — archive\n\n## Applied\n\n## 2026-05-02 — drain 2\n\n"
+    "| id | rule | home | commit | edges |\n|------|------|------|--------|-------|\n" + rows, None)
+_, ctx = run_hook(root)
+for home, rule in STAYS:
+    check(f"home {home!r} stays injected", rule in ctx, ctx)
+for home, rule in GATES:
+    check(f"home {home!r} is enforced, not restated", rule not in ctx, ctx)
+
+root = make_project(
+    "# Lessons — archive\n\n## Applied\n\n## 2026-05-02 — drain 2\n\n"
+    "| id | rule | home | commit | edges |\n|------|------|------|--------|-------|\n"
+    "| L3.1 | Only gated. | `tests/test_x.py` | ccc3333 | — |\n", None)
+_, ctx = run_hook(root)
+check("no advisory rule: the enforced line does not say 'more'",
+      "1 applied rule(s) are enforced" in ctx and "more" not in ctx.split("enforced")[0], ctx)
+
 print("\nHOOK — does not report the archive's own format example as data")
 
 root = make_project(

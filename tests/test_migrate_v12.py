@@ -35,6 +35,7 @@ TS_KEY = "ts-" + "9f3c" * 16
 NO_KEYS = {"OPENROUTER_API_KEY": "", "TYPESAFE_API_KEY": ""}
 LOCAL = ".claude/settings.local.json"
 DETECTOR = ".claude/hooks/lesson_detect.py"
+LOOP_TEST = "tests/lessons_loop/test_lessons_loop.py"
 
 USER_QUEUE_ENTRY = """
 ### Migration must not lose me
@@ -307,19 +308,47 @@ class UpgradeFromV12(MigrationBase):
 
     def test_a_file_the_project_amended_is_kept_untouched_and_reported(self):
         implement = self.root / ".claude/skills/implement-ll/SKILL.md"
-        checker = self.root / "scripts/lessons_graph.py"
+        hook = self.root / ".claude/hooks/session_start_lessons.py"
+        loop_test = self.root / LOOP_TEST
         implement.write_text(implement.read_text() + "\n- Learned rule: always rerun the nightly job twice.\n")
-        checker.write_text(checker.read_text() + "\n# MY LOCAL TWEAK\n")
-        edited = {p: p.read_bytes() for p in (implement, checker)}
+        hook.write_text(hook.read_text() + "\n# MY LOCAL TWEAK\n")
+        edited = {p: p.read_bytes() for p in (implement, hook)}
+        held = loop_test.read_bytes()
         for args in (("--upgrade",), ("--upgrade", "--jev-provider", "openrouter"), ("--upgrade",)):
             rc, out = self.run_installer(*args)
             self.assertEqual(rc, 0, out)
             self.assertIn("KEPT AS YOU LEFT THEM", out)
             self.assertIn(".claude/skills/implement-ll/SKILL.md", out)
+            self.assertIn(f"{LOOP_TEST} held at its previous version because "
+                          ".claude/hooks/session_start_lessons.py carries your edits", out)
             for path, content in edited.items():
                 self.assertEqual(path.read_bytes(), content)
+            self.assertEqual(loop_test.read_bytes(), held)
         self.assertTrue((self.root / DETECTOR).exists())
-        self.assertIn("KEEP (edited in this project)", self.run_installer("--dry-run")[1])
+        dry = self.run_installer("--dry-run")[1]
+        self.assertIn("KEEP (edited in this project)", dry)
+        self.assertIn("HELD (its partner carries your edits)", dry)
+
+    def test_an_amended_loop_test_holds_the_hook_at_its_previous_version(self):
+        hook = self.root / ".claude/hooks/session_start_lessons.py"
+        loop_test = self.root / LOOP_TEST
+        loop_test.write_text(loop_test.read_text() + "\n# MY LOCAL CHECK\n")
+        edited, held = loop_test.read_bytes(), hook.read_bytes()
+        rc, out = self.run_installer("--upgrade")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(loop_test.read_bytes(), edited)
+        self.assertEqual(hook.read_bytes(), held)
+        self.assertIn(f".claude/hooks/session_start_lessons.py held at its previous version because "
+                      f"{LOOP_TEST} carries your edits", out)
+
+    def test_an_amended_checker_is_kept_while_the_rest_upgrades(self):
+        checker = self.root / "scripts/lessons_graph.py"
+        checker.write_text(checker.read_text() + "\n# MY LOCAL TWEAK\n")
+        edited = checker.read_bytes()
+        rc, out = self.run_installer("--upgrade")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(checker.read_bytes(), edited)
+        self.assertNotIn("held at its previous version", out)
 
     def test_moving_an_amended_file_aside_lets_the_upgrade_install_the_current_one(self):
         hook = self.root / ".claude/hooks/session_start_lessons.py"

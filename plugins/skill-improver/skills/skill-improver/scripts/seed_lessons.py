@@ -210,6 +210,7 @@ def planned_files(lay: Layout, empty_queue: bool, *, with_jev: bool = False) -> 
         {"dest": lay.hook, "src": "hooks/session_start_lessons.py", "kind": "code",
          "role": "the part that removes remembering",
          "legacy": ["legacy/hooks/session_start_lessons.v1.3.1.py"],
+         "couples": f"{lay.tests}/test_lessons_loop.py",
          "constants": {"SCRIPTS_REL": lay.scripts, "ARCHIVE_REL": lay.archive,
                        "QUEUE_REL": lay.queue}},
         {"dest": f"{lay.skills}/lessons/SKILL.md", "src": "skills/lessons/SKILL.md",
@@ -221,6 +222,7 @@ def planned_files(lay: Layout, empty_queue: bool, *, with_jev: bool = False) -> 
         {"dest": f"{lay.tests}/test_lessons_loop.py", "src": "tests/test_lessons_loop.py",
          "kind": "code", "role": "proves the checker and hook actually fire",
          "legacy": ["legacy/tests/test_lessons_loop.v1.3.1.py"],
+         "couples": lay.hook,
          "constants": {"ROOT_UP": tests_root_up, "CHECKER_REL": lay.checker,
                        "HOOK_REL": lay.hook, "SKILLS_REL": lay.skills,
                        "TEMPLATE_ARCHIVE_REL": f"{lay.tests}/template-archive.md",
@@ -657,10 +659,25 @@ def file_state(lay: Layout, f: dict) -> str:
     return "outdated" if any(found == render(lay, f, old) for old in f.get("legacy", ())) else "customised"
 
 
-def install(lay: Layout, files: list[dict], upgrade: bool, journal: Journal) -> list[str]:
+def hold_coupled(files: list[dict], states: dict[str, str]) -> dict[str, str]:
+    """Mark an outdated file `held` when the file it is tested against carries the project's edits.
+
+    The hook and its test assert each other's behaviour, so refreshing one beside a customised
+    other makes the upgrade's own verification fail.
+    """
+    held = dict(states)
+    for f in files:
+        partner = f.get("couples")
+        if states[f["dest"]] == "outdated" and partner and states.get(partner) == "customised":
+            held[f["dest"]] = "held"
+    return held
+
+
+def install(lay: Layout, files: list[dict], upgrade: bool, journal: Journal,
+            states: dict[str, str]) -> list[str]:
     """Write what is missing, and with --upgrade what is stale. Rendering finishes before the first write."""
-    todo = [(f, render(lay, f)) for f in files if file_state(lay, f) == "create"
-            or (upgrade and file_state(lay, f) == "outdated")]
+    todo = [(f, render(lay, f)) for f in files if states[f["dest"]] == "create"
+            or (upgrade and states[f["dest"]] == "outdated")]
     written = []
     for f, text in todo:
         dest = lay.root / f["dest"]
@@ -769,9 +786,10 @@ def main(argv: list[str]) -> int:
     present = [f for f in files if (lay.root / f["dest"]).exists()]
     installed_already = any(f["kind"] == "code" for f in present)
 
-    states = {f["dest"]: file_state(lay, f) for f in files}
+    states = hold_coupled(files, {f["dest"]: file_state(lay, f) for f in files})
     outdated = [d for d, st in states.items() if st == "outdated"]
     customised = [d for d, st in states.items() if st == "customised"]
+    held = {f["dest"]: f["couples"] for f in files if states[f["dest"]] == "held"}
     print(f"project root : {lay.root}")
     print(f"layout       : docs={lay.docs}/  scripts={lay.scripts}/  "
           f"hooks={lay.hooks}/  skills={lay.skills}/  tests={lay.tests}/"
@@ -794,6 +812,8 @@ def main(argv: list[str]) -> int:
             verdict = "up to date"
         elif state == "customised":
             verdict = "KEEP (edited in this project)"
+        elif state == "held":
+            verdict = "HELD (its partner carries your edits)"
         elif args.upgrade:
             verdict = "upgrade (.bak kept)"
         else:
@@ -826,7 +846,7 @@ def main(argv: list[str]) -> int:
             report_jev(lay, provider, jev_verdict, dry_run=True)
         elif installed_already:
             report_jev_state(lay)
-        report_customised(customised)
+        report_customised(customised, held)
         report_wiring(lay)
         print("\n--dry-run: nothing was written.")
         if installed_already:
@@ -836,7 +856,7 @@ def main(argv: list[str]) -> int:
     # --- write --------------------------------------------------------------
     journal = Journal()
     try:
-        written = install(lay, files, upgrade=args.upgrade, journal=journal)
+        written = install(lay, files, upgrade=args.upgrade, journal=journal, states=states)
         print("\nWROTE")
         for w in written:
             print(f"  {w}")
@@ -859,7 +879,7 @@ def main(argv: list[str]) -> int:
         report_jev(lay, provider, jev_verdict, dry_run=False)
     elif installed_already:
         report_jev_state(lay)
-    report_customised(customised)
+    report_customised(customised, held)
     report_wiring(lay)
 
     if args.seed_from_session:
@@ -898,7 +918,7 @@ def wrote_settings(lay: Layout, merged: dict, verdict: str, provider: str | None
         print(f"  {LOCAL_SETTINGS} ({jev_verdict})")
 
 
-def report_customised(paths: list[str]) -> None:
+def report_customised(paths: list[str], held: dict[str, str]) -> None:
     if not paths:
         return
     print("\nKEPT AS YOU LEFT THEM — these generated files differ from every version this plugin has shipped,")
@@ -906,6 +926,9 @@ def report_customised(paths: list[str]) -> None:
     for path in paths:
         print(f"  {path}")
     print("To take the plugin's version of one, move it aside and re-run --upgrade.")
+    for dest, partner in held.items():
+        print(f"{dest} held at its previous version because {partner} carries your edits — "
+              f"move {partner} aside and re-run --upgrade to take both")
 
 
 def report_wiring(lay: Layout) -> None:

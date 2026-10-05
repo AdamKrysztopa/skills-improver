@@ -59,34 +59,20 @@ def build_context() -> str:
                if k in ("supersedes", "reverses", "moves")}
     live = [e for e in entries if not e.declined and e.id not in retired]
 
-    def enforced(e) -> bool:
-        home = e.home.strip("` ")
-        return lg.home_rank(home) in ("hook", "gate") and not home.endswith(".md")
-
-    advisory = [e for e in live if not enforced(e)]
-    mechanical = [e for e in live if enforced(e)]
-
     if not live and not titles:
         return ""
 
     out: list[str] = ["## Lessons this project has already learned", ""]
 
-    if advisory:
+    if live:
         out.append(
             f"These are applied rules from `{ARCHIVE_REL}`. They are doctrine here — "
             f"follow them without being asked."
         )
         out.append("")
-        for e in advisory:
+        for e in live:
             home = f"  [{e.home}]" if e.home else ""
             out.append(f"- **{e.id}** {e.rule}{home}")
-        out.append("")
-    if mechanical:
-        out.append(
-            f"{len(mechanical)} more applied rule(s) are enforced by a hook or a test, so they are not "
-            f"restated here: {', '.join(e.id for e in mechanical)}. If one of those checks fires, "
-            f"its row in `{ARCHIVE_REL}` says why it exists."
-        )
         out.append("")
 
     if titles:

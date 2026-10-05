@@ -161,7 +161,7 @@ check("missing archive reports cleanly, not as a finding",
       "no archive" in missing.stdout and "OSCILLATION" not in missing.stdout)
 
 # --------------------------------------------------------------------------
-print("\nHOOK — enforced rules by id, queue as titles")
+print("\nHOOK — injects applied rules in full, queue as titles")
 
 root = make_project(
     (HERE / "fixture-clean.md").read_text(encoding="utf-8"),
@@ -172,11 +172,9 @@ proc, ctx = run_hook(root)
 
 check("hook exits zero", proc.returncode == 0, proc.stderr)
 check("emits SessionStart additionalContext", bool(ctx), proc.stdout)
-check("a hook-homed rule is named by id, not restated",
-      "L2.1" in ctx and "Every documented check has a mechanical counterpart or is deleted." not in ctx, ctx)
-check("a test-homed rule is named by id, not restated",
-      "L1.2" in ctx and "Rendered output is measured" not in ctx, ctx)
-check("an enforced rule's home is not repeated", ".claude/hooks/check_docs.py" not in ctx, ctx)
+check("injects an applied rule in full",
+      "Every documented check has a mechanical counterpart or is deleted." in ctx)
+check("names the rule's home", ".claude/hooks/check_docs.py" in ctx)
 check("excludes declined lines from injection",
       "declined" not in ctx.lower(),
       "a decline is a decision, not a rule")
@@ -188,29 +186,6 @@ check("does not paste full queue entries",
       "What happened" not in ctx,
       "queue bodies leaked into the session-start block")
 check("points at the capture skill", "`lessons` skill" in ctx)
-
-print("\nSESSIONSTART — enforced rules are listed, not restated")
-
-ENFORCED_ARCHIVE = """# Lessons — archive
-
-## Applied
-
-## 2026-05-01 — drain 1
-
-| id | rule | home | commit | edges |
-|------|------|------|--------|-------|
-| L1.1 | Never commit a .env file. | `.claude/hooks/block_env.py` | aaa1111 | — |
-| L1.2 | Dates are parsed with the project helper. | `tests/test_dates.py` | aaa1111 | — |
-| L1.3 | Explain trade-offs before recommending. | `CLAUDE.md` | aaa1111 | — |
-| L1.4 | Hooks guide wording stays current. | `docs/hooks-guide.md` | aaa1111 | — |
-"""
-root = make_project(ENFORCED_ARCHIVE, None)
-_, ctx = run_hook(root)
-check("judgment rule is restated", "Explain trade-offs before recommending." in ctx, ctx)
-check("hook-enforced rule is not restated", "Never commit a .env file." not in ctx, ctx)
-check("test-enforced rule is not restated", "Dates are parsed with the project helper." not in ctx, ctx)
-check("enforced rules are still named by id", "L1.1" in ctx and "L1.2" in ctx, ctx)
-check("markdown home with 'hook' in its name stays injected", "Hooks guide wording stays current." in ctx, ctx)
 
 print("\nHOOK — does not report the archive's own format example as data")
 
@@ -252,7 +227,7 @@ root = make_project((HERE / "fixture-clean.md").read_text(encoding="utf-8"),
                     "# Lessons — queue\n\n## Open\n\n<!-- empty -->\n")
 proc, ctx = run_hook(root)
 check("empty queue: no waiting-lessons line", "waiting to be drained" not in ctx, ctx)
-check("empty queue: rules still named by id", "L2.1" in ctx, ctx)
+check("empty queue: rules still injected", "mechanical counterpart" in ctx)
 
 print("\nHOOK — surfaces a graph finding at session start")
 

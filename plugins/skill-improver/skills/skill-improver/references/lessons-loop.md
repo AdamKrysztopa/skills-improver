@@ -38,6 +38,8 @@ machinery fires.
 | capture skill | `.claude/skills/lessons/` | writes one entry and stops |
 | drain skill | `.claude/skills/implement-ll/` | groups, routes, applies, verifies, archives |
 
+The hook restates only the rules that still need the model's judgment. A rule whose home is a hook or a test is enforced without anyone remembering it, so it is listed by id with a pointer to its archive row instead of being repeated. Rules homed in prose, including markdown files with `hook` in their name, are still injected in full.
+
 The installer detects the host's conventions (`doc/` vs `docs/`, `bin/` vs `scripts/`, an existing
 `tests/`) and retargets every path inside the scripts, the skills and the prose. Names adapt; the
 roles must stay distinct.

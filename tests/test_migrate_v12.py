@@ -307,10 +307,10 @@ class UpgradeFromV12(MigrationBase):
 
     def test_a_file_the_project_amended_is_kept_untouched_and_reported(self):
         implement = self.root / ".claude/skills/implement-ll/SKILL.md"
-        hook = self.root / ".claude/hooks/session_start_lessons.py"
+        checker = self.root / "scripts/lessons_graph.py"
         implement.write_text(implement.read_text() + "\n- Learned rule: always rerun the nightly job twice.\n")
-        hook.write_text(hook.read_text() + "\n# MY LOCAL TWEAK\n")
-        edited = {p: p.read_bytes() for p in (implement, hook)}
+        checker.write_text(checker.read_text() + "\n# MY LOCAL TWEAK\n")
+        edited = {p: p.read_bytes() for p in (implement, checker)}
         for args in (("--upgrade",), ("--upgrade", "--jev-provider", "openrouter"), ("--upgrade",)):
             rc, out = self.run_installer(*args)
             self.assertEqual(rc, 0, out)

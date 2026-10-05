@@ -284,7 +284,8 @@ class IoTests(unittest.TestCase):
             with self.assertRaises(Killed):
                 self.run_hook("PostToolUseFailure", fail_payload(err="Exit code 1\nk%d" % i), killed)
         t = FakeTransport(0.9)
-        self.assertIsNone(self.run_hook("PostToolUseFailure", fail_payload(err="Exit code 1\nafter"), t))
+        self.assertIsNone(self.run_hook("PostToolUseFailure", fail_payload(err="Exit code 1\nafter"), t,
+                                         now=self.now + D.STALE_S))
         self.assertEqual(t.bodies, [])
 
     def test_save_failure_leaves_no_temp_file_behind(self):
@@ -346,6 +347,39 @@ class IoTests(unittest.TestCase):
         for f in files:
             self.assertEqual(f.stat().st_mode & 0o077, 0)
             self.assertNotIn(KEY, f.read_text())
+
+    # --- corpus capture --------------------------------------------------------
+    def test_corpus_capture_appends_the_redacted_window_without_the_key(self):
+        corpus = Path(self._tmp.name) / "c.jsonl"
+        env = {**self.env, "SKILL_IMPROVER_JEV_CORPUS": str(corpus)}
+        t = FakeTransport(0.1)
+        self.run_hook("PostToolUseFailure", fail_payload(err="Exit code 1\n" + KEY), t, env=env)
+        lines = corpus.read_text().splitlines()
+        self.assertEqual(len(lines), 1)
+        row = json.loads(lines[0])
+        self.assertEqual(row["trigger"], "fail")
+        self.assertEqual(row["window"][-1]["k"], "fail")
+        self.assertRegex(row["g"], r"^[0-9a-f]{12}$")
+        self.run_hook("PostToolUseFailure", fail_payload(err="again"), t, env=env)
+        self.assertEqual(json.loads(corpus.read_text().splitlines()[1])["g"], row["g"])
+        self.assertNotIn(KEY, corpus.read_text())
+        self.assertEqual(corpus.stat().st_mode & 0o077, 0)
+
+    def test_corpus_capture_is_off_by_default_and_skips_other_events(self):
+        corpus = Path(self._tmp.name) / "c.jsonl"
+        t = FakeTransport(0.1)
+        self.run_hook("PostToolUseFailure", fail_payload(), t)
+        self.assertFalse(corpus.exists())
+        env = {**self.env, "SKILL_IMPROVER_JEV_CORPUS": str(corpus)}
+        self.run_hook("PostToolUse", {"session_id": "s1", "tool_name": "Bash",
+                                      "tool_input": {"command": "pytest -q"}}, t, env=env)
+        self.assertFalse(corpus.exists())
+
+    def test_corpus_capture_failure_never_breaks_the_hook(self):
+        env = {**self.env, "SKILL_IMPROVER_JEV_CORPUS": str(Path(self._tmp.name) / "missing" / "c.jsonl")}
+        t = FakeTransport(0.1)
+        self.run_hook("PostToolUseFailure", fail_payload(), t, env=env)
+        self.assertEqual(len(t.bodies), 1)
 
     def test_concurrent_writers_never_leave_invalid_json(self):
         path = self.state_dir / "race.json"

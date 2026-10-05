@@ -8,6 +8,7 @@ byte-for-byte snapshot of commit 6f19174), not by hand-writing what it would hav
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import importlib.util
 import io
@@ -35,6 +36,7 @@ TS_KEY = "ts-" + "9f3c" * 16
 NO_KEYS = {"OPENROUTER_API_KEY": "", "TYPESAFE_API_KEY": ""}
 LOCAL = ".claude/settings.local.json"
 DETECTOR = ".claude/hooks/lesson_detect.py"
+LOOP_TEST = "tests/lessons_loop/test_lessons_loop.py"
 
 USER_QUEUE_ENTRY = """
 ### Migration must not lose me
@@ -56,10 +58,11 @@ USER_ARCHIVE_SECTION = """
 
 def snapshot(root: Path) -> dict:
     return {str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*"))
-            if p.is_file() and ".git" not in p.relative_to(root).parts}
+            if p.is_file() and not {".git", "__pycache__"} & set(p.relative_to(root).parts)}
 
 
 class MigrationBase(unittest.TestCase):
+    installer = V12_INSTALLER
     skeleton = ("docs", "scripts", "tests")
 
     def setUp(self):
@@ -88,8 +91,8 @@ class MigrationBase(unittest.TestCase):
         return {**os.environ, "HOME": str(self.home), "GIT_CONFIG_GLOBAL": os.devnull,
                 "XDG_CONFIG_HOME": str(self.home / "xdg"), **NO_KEYS, **(extra or {})}
 
-    def seed_v12(self, *args):
-        proc = subprocess.run([sys.executable, str(V12_INSTALLER), "--root", str(self.root),
+    def seed_old(self, *args):
+        proc = subprocess.run([sys.executable, str(self.installer), "--root", str(self.root),
                                *(args or ("--seed",))],
                               env=self.env(), capture_output=True, text=True)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
@@ -119,9 +122,9 @@ class MigrationBase(unittest.TestCase):
         subprocess.run(["git", "init", "-q"], cwd=self.root, check=True, env=self.env())
 
     # --- the realistic starting state ------------------------------------------------------
-    def make_v12_project(self, docs="docs"):
-        """A v1.2-seeded project that has been lived in: real queue entry, real drained archive."""
-        self.seed_v12()
+    def make_old_project(self, *seed_args, docs="docs"):
+        """A project seeded by `self.installer` that has been lived in: real queue entry, real drained archive."""
+        self.seed_old(*seed_args)
         with (self.root / docs / "lessons.md").open("a", encoding="utf-8") as q:
             q.write(USER_QUEUE_ENTRY)
         with (self.root / docs / "LESSONS-ARCHIVE.md").open("a", encoding="utf-8") as a:
@@ -132,6 +135,10 @@ class MigrationBase(unittest.TestCase):
         for rel, before in self.ledger.items():
             self.assertEqual((self.root / rel).read_bytes(), before, rel + " was modified")
 
+    def layout(self):
+        return S.detect_layout(argparse.Namespace(root=str(self.root), docs_dir=None,
+                                                  scripts_dir=None, tests_dir=None))
+
     def read_local(self):
         return json.loads((self.root / LOCAL).read_text())
 
@@ -141,6 +148,30 @@ class MigrationBase(unittest.TestCase):
 
     def tree_without_baks(self):
         return {k: v for k, v in snapshot(self.root).items() if ".bak" not in k}
+
+    def assert_machinery_matches_a_fresh_install(self, *fresh_args):
+        fresh = Path(self._tmp.name) / "fresh"
+        fresh.mkdir()
+        for name in self.skeleton:
+            (fresh / name).mkdir()
+        self.seed_fresh(fresh, *fresh_args)
+        migrated, pristine = self.tree_without_baks(), snapshot(fresh)
+        data = {"docs/lessons.md", "docs/LESSONS-ARCHIVE.md"}
+        for rel, content in pristine.items():
+            if rel not in data:
+                self.assertEqual(migrated.get(rel), content, rel)
+        self.assertEqual(set(migrated) - set(pristine), set())
+
+
+class InstallLeavesNoBytecode(MigrationBase):
+    def test_a_fresh_seed_writes_no_pycache_anywhere_in_the_project(self):
+        env = {k: v for k, v in self.env().items() if k != "PYTHONDONTWRITEBYTECODE"}
+        env.pop("PYTHONPYCACHEPREFIX", None)
+        proc = subprocess.run([sys.executable, str(SKILL / "scripts" / "seed_lessons.py"),
+                               "--root", str(self.root), "--seed"],
+                              env=env, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual([str(p) for p in self.root.rglob("__pycache__")], [])
 
 
 class SnapshotIsGenuine(unittest.TestCase):
@@ -165,7 +196,7 @@ class SnapshotIsGenuine(unittest.TestCase):
 class UpgradeFromV12(MigrationBase):
     def setUp(self):
         super().setUp()
-        self.make_v12_project()
+        self.make_old_project()
 
     def test_dry_run_recognises_the_existing_loop_and_changes_nothing(self):
         before = snapshot(self.root)
@@ -197,17 +228,7 @@ class UpgradeFromV12(MigrationBase):
 
     def test_upgraded_machinery_is_identical_to_a_fresh_v13_install(self):
         self.run_installer("--upgrade")
-        fresh = Path(self._tmp.name) / "fresh"
-        fresh.mkdir()
-        for name in self.skeleton:
-            (fresh / name).mkdir()
-        self.seed_fresh(fresh)
-        migrated, pristine = self.tree_without_baks(), snapshot(fresh)
-        data = {"docs/lessons.md", "docs/LESSONS-ARCHIVE.md"}
-        for rel, content in pristine.items():
-            if rel not in data:
-                self.assertEqual(migrated.get(rel), content, rel)
-        self.assertEqual(set(migrated) - set(pristine), set())
+        self.assert_machinery_matches_a_fresh_install()
 
     def test_the_migrated_loop_actually_works_on_the_real_ledger(self):
         rc, out = self.run_installer("--upgrade")
@@ -308,18 +329,46 @@ class UpgradeFromV12(MigrationBase):
     def test_a_file_the_project_amended_is_kept_untouched_and_reported(self):
         implement = self.root / ".claude/skills/implement-ll/SKILL.md"
         hook = self.root / ".claude/hooks/session_start_lessons.py"
+        loop_test = self.root / LOOP_TEST
         implement.write_text(implement.read_text() + "\n- Learned rule: always rerun the nightly job twice.\n")
         hook.write_text(hook.read_text() + "\n# MY LOCAL TWEAK\n")
         edited = {p: p.read_bytes() for p in (implement, hook)}
+        held = loop_test.read_bytes()
         for args in (("--upgrade",), ("--upgrade", "--jev-provider", "openrouter"), ("--upgrade",)):
             rc, out = self.run_installer(*args)
             self.assertEqual(rc, 0, out)
             self.assertIn("KEPT AS YOU LEFT THEM", out)
             self.assertIn(".claude/skills/implement-ll/SKILL.md", out)
+            self.assertIn(f"{LOOP_TEST} held at its previous version because "
+                          ".claude/hooks/session_start_lessons.py carries your edits", out)
             for path, content in edited.items():
                 self.assertEqual(path.read_bytes(), content)
+            self.assertEqual(loop_test.read_bytes(), held)
         self.assertTrue((self.root / DETECTOR).exists())
-        self.assertIn("KEEP (edited in this project)", self.run_installer("--dry-run")[1])
+        dry = self.run_installer("--dry-run")[1]
+        self.assertIn("KEEP (edited in this project)", dry)
+        self.assertIn("HELD (its partner carries your edits)", dry)
+
+    def test_an_amended_loop_test_holds_the_hook_at_its_previous_version(self):
+        hook = self.root / ".claude/hooks/session_start_lessons.py"
+        loop_test = self.root / LOOP_TEST
+        loop_test.write_text(loop_test.read_text() + "\n# MY LOCAL CHECK\n")
+        edited, held = loop_test.read_bytes(), hook.read_bytes()
+        rc, out = self.run_installer("--upgrade")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(loop_test.read_bytes(), edited)
+        self.assertEqual(hook.read_bytes(), held)
+        self.assertIn(f".claude/hooks/session_start_lessons.py held at its previous version because "
+                      f"{LOOP_TEST} carries your edits", out)
+
+    def test_an_amended_checker_is_kept_while_the_rest_upgrades(self):
+        checker = self.root / "scripts/lessons_graph.py"
+        checker.write_text(checker.read_text() + "\n# MY LOCAL TWEAK\n")
+        edited = checker.read_bytes()
+        rc, out = self.run_installer("--upgrade")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(checker.read_bytes(), edited)
+        self.assertNotIn("held at its previous version", out)
 
     def test_moving_an_amended_file_aside_lets_the_upgrade_install_the_current_one(self):
         hook = self.root / ".claude/hooks/session_start_lessons.py"
@@ -353,7 +402,7 @@ class WiringIsPreserved(MigrationBase):
             "statusLine": {"type": "command", "command": "status.sh"},
         }
         (self.root / ".claude/settings.json").write_text(json.dumps(settings, indent=4))
-        self.seed_v12()
+        self.seed_old()
         registered = (self.root / ".claude/settings.json").read_text()
         self.assertEqual(registered.count("session_start_lessons.py"), 1)
         for key in ("PreToolUse", "guard.sh", "echo mine", "statusLine", "Bash(rm -rf:*)"):
@@ -364,7 +413,7 @@ class WiringIsPreserved(MigrationBase):
         self.assertIn("already registered", out)
 
     def test_a_customised_session_start_command_is_respected_not_duplicated(self):
-        self.seed_v12()
+        self.seed_old()
         path = self.root / ".claude/settings.json"
         settings = json.loads(path.read_text())
         settings["hooks"]["SessionStart"][0]["hooks"][0]["command"] = (
@@ -375,7 +424,7 @@ class WiringIsPreserved(MigrationBase):
         self.assertEqual(path.read_text(), before)
 
     def test_unrelated_personal_hooks_and_env_survive_enabling(self):
-        self.seed_v12()
+        self.seed_old()
         mine = {"env": {"FOO": "bar"},
                 "hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "log.sh"}]}]}}
         (self.root / LOCAL).write_text(json.dumps(mine))
@@ -390,7 +439,7 @@ class WiringIsPreserved(MigrationBase):
             (self.root / name).rmdir()
         for name in ("doc", "bin", "test"):
             (self.root / name).mkdir()
-        self.make_v12_project(docs="doc")
+        self.make_old_project(docs="doc")
         self.assertTrue((self.root / "doc/lessons.md").exists())
         for name in ("docs", "scripts", "tests"):
             (self.root / name).mkdir()
@@ -405,7 +454,7 @@ class WiringIsPreserved(MigrationBase):
         self.assertIn("doc/", out)
 
     def test_an_edited_hook_that_points_somewhere_unrecognisable_stops_the_upgrade(self):
-        self.make_v12_project()
+        self.make_old_project()
         hook = self.root / ".claude/hooks/session_start_lessons.py"
         hook.write_text(hook.read_text().replace('QUEUE_REL = "docs/lessons.md"', 'QUEUE_REL = "notes/todo.md"'))
         before = snapshot(self.root)
@@ -418,7 +467,7 @@ class WiringIsPreserved(MigrationBase):
 class NoCredentialLeaks(MigrationBase):
     def test_no_untracked_unignored_or_backup_file_ever_holds_a_key(self):
         self.git_init()
-        self.make_v12_project()
+        self.make_old_project()
         (self.root / ".claude").mkdir(exist_ok=True)
         (self.root / LOCAL).write_text(json.dumps({"env": {"OPENROUTER_API_KEY": KEY}}))
         self.run_installer("--upgrade", "--jev-provider", "openrouter")
@@ -435,7 +484,7 @@ class NoCredentialLeaks(MigrationBase):
         self.assertNotIn("settings.local", self.git("ls-files", "--others", "--exclude-standard"))
 
     def test_a_key_held_in_the_shared_settings_file_is_not_copied_into_a_backup(self):
-        self.seed_v12()
+        self.seed_old()
         path = self.root / ".claude/settings.json"
         settings = json.loads(path.read_text())
         settings["env"] = {"OPENROUTER_API_KEY": KEY}
@@ -449,7 +498,7 @@ class NoCredentialLeaks(MigrationBase):
 class FailureCannotDamageTheLoop(MigrationBase):
     def setUp(self):
         super().setUp()
-        self.make_v12_project()
+        self.make_old_project()
 
     def test_a_write_failure_midway_restores_every_file_already_replaced(self):
         before = snapshot(self.root)

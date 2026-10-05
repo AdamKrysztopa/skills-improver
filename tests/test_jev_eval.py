@@ -97,7 +97,8 @@ class EvalLogTests(unittest.TestCase):
         off = Session(self.tmp / "a", None, Scores(0.2, 0.9, 0.1))
         on = Session(self.tmp / "b", "eval.jsonl", Scores(0.2, 0.9, 0.1))
         self.assertEqual(off.script(), on.script())
-        states = lambda s: {p.name: json.loads(p.read_text()) for p in s.state.glob("*.json")}
+        states = lambda s: {p.name: {k: v for k, v in json.loads(p.read_text()).items() if k != "project"}
+                            for p in s.state.glob("*.json")}
         self.assertEqual(states(off), states(on))
         self.assertTrue((self.tmp / "b" / "proj" / "eval.jsonl").exists())
 

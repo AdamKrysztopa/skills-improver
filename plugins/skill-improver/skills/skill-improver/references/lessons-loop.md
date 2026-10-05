@@ -34,9 +34,11 @@ machinery fires.
 | the queue | `docs/lessons.md` | short-lived working list; **empty is the healthy state** |
 | the graph | `docs/LESSONS-ARCHIVE.md` | one dated section per drain, newest first; the loop's entire memory |
 | the hook | `.claude/hooks/session_start_lessons.py` | injects applied rules + queue depth into every session |
-| the checker | `scripts/lessons_graph.py` | oscillation, recurrence, dangling edges; exits 1 |
+| the checker | `scripts/lessons_graph.py` | oscillation and recurrence over the edges Claude declared, plus dangling edges; exits 1 |
 | capture skill | `.claude/skills/lessons/` | writes one entry and stops |
 | drain skill | `.claude/skills/implement-ll/` | groups, routes, applies, verifies, archives |
+
+The hook restates only the rules that still need the model's judgment. A rule whose home is a safeguard that exists and is known to run — a Claude Code hook registered in `.claude/settings*.json`, an executable git hook, an installed pre-commit config, a CI workflow, a test — is enforced without anyone remembering it, so it is listed by id with a pointer to its archive row instead of being repeated. Rules homed in prose, in several files, in a path that only resembles a gate (`src/webhooks/retry.py`, `docs/hooks.rst`), in a Makefile or task runner someone must invoke, or in a safeguard that is missing or unregistered, are still injected in full.
 
 The installer detects the host's conventions (`doc/` vs `docs/`, `bin/` vs `scripts/`, an existing
 `tests/`) and retargets every path inside the scripts, the skills and the prose. Names adapt; the
@@ -131,8 +133,9 @@ archive and checker are unchanged. It changes *when* capture is suggested, nothi
   environment (shell profile, or an `env` block in a Claude Code settings file) or a project `.env`
   (git-ignore it; the installer warns if it isn't). The installer reports whether the key was found
   and makes one connectivity call; a missing or bad key never fails the install.
-- **What it sends:** at most the last 8 events — truncated, secret-shaped values redacted, paths
-  relative; no file contents, no transcript. This is an external inference call. Per-session state
+- **What it sends:** bounded, redacted event snippets, never the transcript or file contents: at
+  most the last 8 events, truncated, secret-shaped values redacted, paths relative. Redaction is
+  best-effort regex, not DLP. This is an external inference call. Per-session state
   lives in the OS temp dir, not the repo.
 - **Failure:** the hook always exits 0. No key, timeouts, 429s, malformed replies: silent no-op
   (three transient failures in a row pause calls for 30 minutes). A key that is present but out of
@@ -225,8 +228,8 @@ built.
   bundled one has no dependencies and reads one file, so there is rarely a reason to rewrite it.
 - **No hook mechanism** — inject via whatever file is loaded unconditionally at session start, and
   say plainly in the report that this is a weaker substitute that will decay.
-- **Monorepos** — one queue per team boundary, one shared archive. Recurrence across teams is the
-  most valuable signal the graph produces.
+- **Monorepos** — one queue per team boundary, one shared archive. Recurrence across teams, once
+  declared as a `recurs` edge, is the most valuable signal the graph produces.
 - **An existing retro process** — wire into it rather than replacing it. The queue is the artefact
   that matters; the ceremony around it can be whatever already exists.
 

@@ -31,6 +31,50 @@ QUEUE_REL = "docs/lessons.md"
 
 MAX_QUEUE_TITLES = 12
 
+_DOC_SUFFIXES = (".md", ".rst", ".txt", ".adoc")
+_SETTINGS = (".claude/settings.json", ".claude/settings.local.json")
+
+
+def _hook_commands(root: Path) -> list[str]:
+    commands = []
+    for rel in _SETTINGS:
+        try:
+            hooks = json.loads((root / rel).read_text(encoding="utf-8")).get("hooks", {})
+            commands += [str(h.get("command", "")) for groups in hooks.values()
+                         for g in groups for h in g.get("hooks", [])]
+        except (OSError, ValueError, AttributeError, TypeError):
+            continue
+    return commands
+
+
+def enforced(home: str, root: Path) -> bool:
+    """True only for a single safeguard that exists and is known to run without anyone remembering.
+
+    A gate-shaped path is not evidence: a Claude Code hook must be registered in settings, a git
+    hook executable, a pre-commit config installed. A Makefile, justfile, nox or tox file runs only
+    when someone invokes it, so its rule is restated. A rule wrongly hidden is lost; a rule wrongly
+    injected only costs a line.
+    """
+    raw = home.strip().strip("`").strip()
+    h = raw.lower()
+    if not h or "," in h or any(c.isspace() for c in h) or h.endswith(_DOC_SUFFIXES):
+        return False
+    path = root / raw
+    if not path.is_file():
+        return False
+    parts = h.split("/")
+    name = parts[-1]
+    if h.startswith(".claude/hooks/"):
+        return any(raw in command for command in _hook_commands(root))
+    if h.startswith(".git/hooks/"):
+        return os.access(path, os.X_OK)
+    if h.startswith(".github/workflows/"):
+        return True
+    if name == ".pre-commit-config.yaml":
+        return (root / ".git" / "hooks" / "pre-commit").is_file()
+    return (name == "conftest.py" or name.startswith("test_") or name.endswith("_test.py")
+            or "tests" in parts or "test" in parts)
+
 
 def project_root() -> Path:
     """Locate the project root by looking for the ledger, not by counting `..`."""
@@ -59,20 +103,32 @@ def build_context() -> str:
                if k in ("supersedes", "reverses", "moves")}
     live = [e for e in entries if not e.declined and e.id not in retired]
 
+    gated = {e.id for e in live if enforced(e.home, root)}
+    advisory = [e for e in live if e.id not in gated]
+    mechanical = [e for e in live if e.id in gated]
+
     if not live and not titles:
         return ""
 
     out: list[str] = ["## Lessons this project has already learned", ""]
 
-    if live:
+    if advisory:
         out.append(
             f"These are applied rules from `{ARCHIVE_REL}`. They are doctrine here — "
             f"follow them without being asked."
         )
         out.append("")
-        for e in live:
+        for e in advisory:
             home = f"  [{e.home}]" if e.home else ""
             out.append(f"- **{e.id}** {e.rule}{home}")
+        out.append("")
+    if mechanical:
+        out.append(
+            f"{len(mechanical)}{' more' if advisory else ''} applied rule(s) are enforced by a hook, test "
+            f"or CI gate, so they are not "
+            f"restated here: {', '.join(e.id for e in mechanical)}. If one of those checks fires, "
+            f"its row in `{ARCHIVE_REL}` says why it exists."
+        )
         out.append("")
 
     if titles:

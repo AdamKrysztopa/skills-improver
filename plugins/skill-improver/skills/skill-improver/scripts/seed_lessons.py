@@ -29,6 +29,7 @@ import re
 import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ASSETS = Path(__file__).resolve().parent.parent / "assets" / "lessons-loop"
@@ -48,8 +49,6 @@ CHECKPOINT_HINTS = (
 
 JEV_PROVIDERS = ("openrouter", "typesafe")
 JEV_LABEL = {"openrouter": "OpenRouter", "typesafe": "TypeSafe (direct)"}
-JEV_EVENTS = (("PostToolUse", "Bash|Edit|Write|MultiEdit"), ("PostToolUseFailure", None),
-              ("UserPromptSubmit", None))
 JEV_STATUS = {
     "credit": "key found, but the account has no credit — detection stays paused and warns once",
     "auth": "key found, but the provider rejected it — detection stays paused and warns once",
@@ -111,6 +110,17 @@ class LayoutError(Exception):
     """The installed hook points somewhere the installer cannot reproduce."""
 
 
+def contained(root: Path, rel: str, what: str) -> str:
+    """`rel` as a normalised project-relative path; LayoutError if it lands outside `root`."""
+    norm = posixpath.normpath(rel.replace("\\", "/"))
+    target = (root / norm).resolve()
+    if posixpath.isabs(norm) or not target.is_relative_to(root):
+        raise LayoutError(
+            f"{what} {rel!r} resolves to {target}, outside the project {root}. Nothing was written. "
+            "Pass --docs-dir / --scripts-dir / --tests-dir with a directory inside the project.")
+    return norm
+
+
 def recover_layout(root: Path, args) -> dict:
     """Read an existing install's layout back from its own SessionStart hook.
 
@@ -159,6 +169,9 @@ def detect_layout(args) -> Layout:
     else:
         tests_base = first_existing(root, TEST_DIR_CANDIDATES, "")
         tests = f"{tests_base}/lessons_loop" if tests_base else f"{scripts}/lessons_loop_tests"
+    docs = contained(root, docs, "docs directory")
+    scripts = contained(root, scripts, "scripts directory")
+    tests = contained(root, tests, "tests directory")
     lay = Layout(root, docs, scripts, ".claude/hooks", ".claude/skills", tests)
     lay.recovered = bool(known)
     return lay
@@ -195,6 +208,8 @@ def planned_files(lay: Layout, empty_queue: bool, *, with_jev: bool = False) -> 
          "constants": {"ARCHIVE_REL": lay.archive, "QUEUE_REL": lay.queue}},
         {"dest": lay.hook, "src": "hooks/session_start_lessons.py", "kind": "code",
          "role": "the part that removes remembering",
+         "legacy": ["legacy/hooks/session_start_lessons.v1.3.1.py"],
+         "couples": f"{lay.tests}/test_lessons_loop.py",
          "constants": {"SCRIPTS_REL": lay.scripts, "ARCHIVE_REL": lay.archive,
                        "QUEUE_REL": lay.queue}},
         {"dest": f"{lay.skills}/lessons/SKILL.md", "src": "skills/lessons/SKILL.md",
@@ -205,6 +220,8 @@ def planned_files(lay: Layout, empty_queue: bool, *, with_jev: bool = False) -> 
          "role": "drain — group, route, apply, verify, archive"},
         {"dest": f"{lay.tests}/test_lessons_loop.py", "src": "tests/test_lessons_loop.py",
          "kind": "code", "role": "proves the checker and hook actually fire",
+         "legacy": ["legacy/tests/test_lessons_loop.v1.3.1.py"],
+         "couples": lay.hook,
          "constants": {"ROOT_UP": tests_root_up, "CHECKER_REL": lay.checker,
                        "HOOK_REL": lay.hook, "SKILLS_REL": lay.skills,
                        "TEMPLATE_ARCHIVE_REL": f"{lay.tests}/template-archive.md",
@@ -221,7 +238,8 @@ def planned_files(lay: Layout, empty_queue: bool, *, with_jev: bool = False) -> 
     if with_jev:
         files.append({"dest": lay.detector, "src": "hooks/lesson_detect.py", "kind": "code",
                       "role": "Jev-assisted detection — Jev scores, Claude still writes the lesson",
-                      "legacy": ["legacy/hooks/lesson_detect.v1.3.0.py"]})
+                      "legacy": ["legacy/hooks/lesson_detect.v1.3.0.py",
+                                 "legacy/hooks/lesson_detect.v1.3.1.py"]})
     return files
 
 
@@ -250,9 +268,9 @@ class Journal:
         n = 0
         while True:
             candidate = path.with_name(path.name + ".bak" + (f".{n}" if n else ""))
-            if not candidate.exists():
+            if not os.path.lexists(candidate):
                 return candidate
-            if candidate.read_bytes() == prior:
+            if not candidate.is_symlink() and candidate.read_bytes() == prior:
                 return None
             n += 1
 
@@ -271,16 +289,10 @@ class Journal:
         self._mkdirs(path.parent)
         bak = self._backup_for(path, prior) if prior is not None and backup else None
         if bak:
-            bak.write_bytes(prior)
-        tmp = path.with_name(path.name + ".tmp")
+            _create_new(bak, prior)
         try:
-            fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(text)
-            tmp.chmod(mode if mode is not None else prior_mode)
-            os.replace(tmp, path)
+            _replace_with(path, text.encode("utf-8"), mode if mode is not None else prior_mode)
         except BaseException:
-            tmp.unlink(missing_ok=True)
             if bak:
                 bak.unlink(missing_ok=True)
             raise
@@ -291,8 +303,7 @@ class Journal:
             if prior is None:
                 path.unlink(missing_ok=True)
             else:
-                path.write_bytes(prior)
-                path.chmod(mode)
+                _replace_with(path, prior, mode)
             if bak:
                 bak.unlink(missing_ok=True)
         for directory in reversed(self._dirs):
@@ -303,10 +314,46 @@ class Journal:
         self._undo, self._dirs = [], []
 
 
+def _create_new(path: Path, data: bytes) -> None:
+    """Write a file that must not exist yet: O_EXCL refuses a planted file or symlink at `path`."""
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(data)
+
+
+def _replace_with(path: Path, data: bytes, mode: int) -> None:
+    """Atomically replace `path` via a randomly named sibling that no pre-existing link can occupy."""
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
 # --- settings.json ----------------------------------------------------------
 
 def hook_command(lay: Layout) -> str:
     return f'python3 "$CLAUDE_PROJECT_DIR/{lay.hook}"'
+
+
+def check_hooks_shape(settings: object) -> None:
+    """Raise ValueError unless settings has the shape Claude Code documents for hooks."""
+    if not isinstance(settings, dict):
+        raise ValueError("top level is not a JSON object")
+    hooks = settings.get("hooks", {})
+    if not isinstance(hooks, dict):
+        raise ValueError('"hooks" is not an object')
+    for event, groups in hooks.items():
+        if not isinstance(groups, list):
+            raise ValueError(f'"hooks.{event}" is not a list')
+        for i, group in enumerate(groups):
+            inner = group.get("hooks", []) if isinstance(group, dict) else None
+            if not isinstance(inner, list) or not all(isinstance(h, dict) for h in inner):
+                raise ValueError(f'"hooks.{event}[{i}]" is not a hook group')
 
 
 def settings_action(lay: Layout) -> tuple[str, dict]:
@@ -314,7 +361,8 @@ def settings_action(lay: Layout) -> tuple[str, dict]:
     path = lay.root / ".claude" / "settings.json"
     try:
         settings = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-    except (OSError, json.JSONDecodeError) as exc:
+        check_hooks_shape(settings)
+    except (OSError, ValueError) as exc:
         return (f"UNPARSEABLE ({exc}) — register the hook by hand", {})
 
     starts = settings.setdefault("hooks", {}).setdefault("SessionStart", [])
@@ -328,6 +376,17 @@ def settings_action(lay: Layout) -> tuple[str, dict]:
     })
     verb = "register SessionStart hook" if path.exists() else "create with SessionStart hook"
     return (verb, settings)
+
+
+def registered(lay: Layout) -> bool:
+    """True when .claude/settings.json actually registers this loop's SessionStart hook."""
+    try:
+        settings = json.loads((lay.root / ".claude" / "settings.json").read_text(encoding="utf-8"))
+        check_hooks_shape(settings)
+    except (OSError, ValueError):
+        return False
+    return any("session_start_lessons.py" in str(h.get("command", ""))
+               for g in settings.get("hooks", {}).get("SessionStart", []) for h in g.get("hooks", []))
 
 
 def write_settings(path: Path, merged: dict, journal: Journal, *, private: bool = False) -> None:
@@ -353,15 +412,7 @@ def load_detector():
 
 def settings_env(root: Path) -> dict:
     """The `env` blocks Claude Code exports to hooks: user, project, then personal project settings."""
-    merged: dict = {}
-    for path in (USER_CLAUDE_DIR / "settings.json", root / ".claude" / "settings.json", root / LOCAL_SETTINGS):
-        try:
-            block = json.loads(path.read_text(encoding="utf-8")).get("env", {})
-        except (OSError, ValueError, AttributeError):
-            continue
-        if isinstance(block, dict):
-            merged.update({k: v for k, v in block.items() if isinstance(v, str)})
-    return merged
+    return load_detector().settings_env(root, USER_CLAUDE_DIR / "settings.json")
 
 
 def find_jev_key(provider: str, root: Path) -> tuple[str | None, str]:
@@ -405,8 +456,8 @@ def _strip_detector(hooks: dict) -> None:
 
 
 def _is_registered(hooks: dict, command: str) -> bool:
-    for event, matcher in JEV_EVENTS:
-        found = any(g.get("matcher") == matcher and any(h.get("command") == command for h in g["hooks"])
+    for event, matcher in load_detector().EVENTS:
+        found = any(g.get("matcher") == matcher and any(h.get("command") == command for h in g.get("hooks", []))
                     for g in hooks.get(event, []))
         if not found:
             return False
@@ -422,10 +473,8 @@ def jev_settings_action(lay: Layout, provider: str) -> tuple[str, dict]:
     path = lay.root / LOCAL_SETTINGS
     try:
         settings = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-        if not isinstance(settings, dict):
-            raise ValueError("not a JSON object")
-        hooks = settings.get("hooks", {})
-        hooks = settings["hooks"] = hooks if isinstance(hooks, dict) else {}
+        check_hooks_shape(settings)
+        hooks = settings.setdefault("hooks", {})
     except (OSError, ValueError) as exc:
         return (f"UNPARSEABLE ({exc}) — register the Jev hooks by hand", {})
 
@@ -441,7 +490,7 @@ def jev_settings_action(lay: Layout, provider: str) -> tuple[str, dict]:
         if not hooks:
             del settings["hooks"]
         return ("remove Jev hooks" if had_any else "not registered", settings)
-    for event, matcher in JEV_EVENTS:
+    for event, matcher in load_detector().EVENTS:
         group = {"hooks": [{"type": "command", "command": command, "timeout": 5}]}
         if matcher:
             group = {"matcher": matcher, **group}
@@ -476,6 +525,7 @@ def report_jev_state(lay: Layout) -> None:
     label = "JEV-ASSISTED LESSON DETECTION"
     if state == "enabled":
         print(f"\n{label}: enabled ({provider}) — unchanged by this run.")
+        print(f"  Health (run from the project root): python3 {lay.detector} --status --probe")
         return
     lead = ("installed but not registered (off)" if state == "off"
             else "not enabled — projects seeded before v1.3 have no Jev registration; that is their normal state")
@@ -561,6 +611,7 @@ def jev_report(lay: Layout, provider: str, *, dry_run: bool) -> None:
          "detection stays inactive until it is found"),
         ("Connectivity", status),
         ("Registration", f"{LOCAL_SETTINGS} (personal, git-ignored by Claude Code)"),
+        ("Health", f"python3 {lay.detector} --status --probe (run from the project root)"),
     ]
     print("\nJEV-ASSISTED LESSON DETECTION (optional — Jev scores a compact window; Claude writes the lesson)")
     for label, value in rows:
@@ -625,10 +676,25 @@ def file_state(lay: Layout, f: dict) -> str:
     return "outdated" if any(found == render(lay, f, old) for old in f.get("legacy", ())) else "customised"
 
 
-def install(lay: Layout, files: list[dict], upgrade: bool, journal: Journal) -> list[str]:
+def hold_coupled(files: list[dict], states: dict[str, str]) -> dict[str, str]:
+    """Mark an outdated file `held` when the file it is tested against carries the project's edits.
+
+    The hook and its test assert each other's behaviour, so refreshing one beside a customised
+    other makes the upgrade's own verification fail.
+    """
+    held = dict(states)
+    for f in files:
+        partner = f.get("couples")
+        if states[f["dest"]] == "outdated" and partner and states.get(partner) == "customised":
+            held[f["dest"]] = "held"
+    return held
+
+
+def install(lay: Layout, files: list[dict], upgrade: bool, journal: Journal,
+            states: dict[str, str]) -> list[str]:
     """Write what is missing, and with --upgrade what is stale. Rendering finishes before the first write."""
-    todo = [(f, render(lay, f)) for f in files if file_state(lay, f) == "create"
-            or (upgrade and file_state(lay, f) == "outdated")]
+    todo = [(f, render(lay, f)) for f in files if states[f["dest"]] == "create"
+            or (upgrade and states[f["dest"]] == "outdated")]
     written = []
     for f, text in todo:
         dest = lay.root / f["dest"]
@@ -641,7 +707,8 @@ def install(lay: Layout, files: list[dict], upgrade: bool, journal: Journal) -> 
 def verify(lay: Layout) -> int:
     """Run the machinery and show what it prints. A hook is code, not a claim."""
     root = lay.root
-    env = {**os.environ, "CLAUDE_PROJECT_DIR": str(root)}
+    env = {**os.environ, "CLAUDE_PROJECT_DIR": str(root),
+           "PYTHONDONTWRITEBYTECODE": "1"}
     rc = 0
 
     print("\n--- the checker, against the seeded-defect fixture "
@@ -728,12 +795,19 @@ def main(argv: list[str]) -> int:
     provider = args.jev_provider
     wants_jev = provider in JEV_PROVIDERS or (args.upgrade and (lay.root / lay.detector).exists())
     files = planned_files(lay, empty_queue=args.seed_from_session, with_jev=wants_jev)
+    try:
+        for f in files:
+            contained(lay.root, f["dest"], "destination")
+    except LayoutError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     present = [f for f in files if (lay.root / f["dest"]).exists()]
     installed_already = any(f["kind"] == "code" for f in present)
 
-    states = {f["dest"]: file_state(lay, f) for f in files}
+    states = hold_coupled(files, {f["dest"]: file_state(lay, f) for f in files})
     outdated = [d for d, st in states.items() if st == "outdated"]
     customised = [d for d, st in states.items() if st == "customised"]
+    held = {f["dest"]: f["couples"] for f in files if states[f["dest"]] == "held"}
     print(f"project root : {lay.root}")
     print(f"layout       : docs={lay.docs}/  scripts={lay.scripts}/  "
           f"hooks={lay.hooks}/  skills={lay.skills}/  tests={lay.tests}/"
@@ -756,6 +830,8 @@ def main(argv: list[str]) -> int:
             verdict = "up to date"
         elif state == "customised":
             verdict = "KEEP (edited in this project)"
+        elif state == "held":
+            verdict = "HELD (its partner carries your edits)"
         elif args.upgrade:
             verdict = "upgrade (.bak kept)"
         else:
@@ -788,7 +864,7 @@ def main(argv: list[str]) -> int:
             report_jev(lay, provider, jev_verdict, dry_run=True)
         elif installed_already:
             report_jev_state(lay)
-        report_customised(customised)
+        report_customised(customised, held)
         report_wiring(lay)
         print("\n--dry-run: nothing was written.")
         if installed_already:
@@ -798,7 +874,7 @@ def main(argv: list[str]) -> int:
     # --- write --------------------------------------------------------------
     journal = Journal()
     try:
-        written = install(lay, files, upgrade=args.upgrade, journal=journal)
+        written = install(lay, files, upgrade=args.upgrade, journal=journal, states=states)
         print("\nWROTE")
         for w in written:
             print(f"  {w}")
@@ -812,16 +888,20 @@ def main(argv: list[str]) -> int:
         return 1
 
     rc = verify(lay)
-    if rc and args.upgrade:
+    if rc:
         journal.rollback()
-        print("\n!! the upgraded machinery failed its own checks (above) — rolled back: every file is "
-              "as it was before this run, and the previous loop is still in place.")
+        if args.upgrade:
+            print("\n!! the upgraded machinery failed its own checks (above) — rolled back: every file is "
+                  "as it was before this run, and the previous loop is still in place.")
+        else:
+            print("\n!! the new machinery failed its own checks (above) — rolled back: nothing this run "
+                  "created is left behind.")
         return rc
     if provider:
         report_jev(lay, provider, jev_verdict, dry_run=False)
     elif installed_already:
         report_jev_state(lay)
-    report_customised(customised)
+    report_customised(customised, held)
     report_wiring(lay)
 
     if args.seed_from_session:
@@ -838,8 +918,14 @@ NEXT — populate the queue from this session
   `Candidate home` (a suggestion, not a decision). Do not implement any of them:
   routing happens at the drain, where they can be grouped.""")
 
-    print("\nDone." if rc == 0 else "\nDone, with failures above.")
-    return rc
+    if not registered(lay):
+        print(f"""
+INSTALLED, NOT WIRED — Claude Code will not run the loop until .claude/settings.json registers:
+  {hook_command(lay)}
+under hooks.SessionStart. Add it by hand, then re-run --upgrade to confirm.""")
+        return 3
+    print("\nDone.")
+    return 0
 
 
 def wrote_settings(lay: Layout, merged: dict, verdict: str, provider: str | None,
@@ -860,7 +946,7 @@ def wrote_settings(lay: Layout, merged: dict, verdict: str, provider: str | None
         print(f"  {LOCAL_SETTINGS} ({jev_verdict})")
 
 
-def report_customised(paths: list[str]) -> None:
+def report_customised(paths: list[str], held: dict[str, str]) -> None:
     if not paths:
         return
     print("\nKEPT AS YOU LEFT THEM — these generated files differ from every version this plugin has shipped,")
@@ -868,6 +954,9 @@ def report_customised(paths: list[str]) -> None:
     for path in paths:
         print(f"  {path}")
     print("To take the plugin's version of one, move it aside and re-run --upgrade.")
+    for dest, partner in held.items():
+        print(f"{dest} held at its previous version because {partner} carries your edits — "
+              f"move {partner} aside and re-run --upgrade to take both")
 
 
 def report_wiring(lay: Layout) -> None:

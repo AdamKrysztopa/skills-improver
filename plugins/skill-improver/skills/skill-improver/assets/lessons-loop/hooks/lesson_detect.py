@@ -7,7 +7,9 @@ tells Claude to run the `lessons` skill; Claude writes the entry, and the queue,
 drain and archive take over unchanged.
 
 Registered in .claude/settings.local.json by `seed_lessons.py --jev-provider`.
-Fails open: every error path exits 0 and prints nothing a session could trip on.
+Hook mode fails open: every error path exits 0 and prints nothing a session could trip on.
+`--status [provider] [--probe]` is the one exception: it is run by a person, reads the provider from
+the project's registration, reports on stderr and exits 1 when anything is wrong, including its own failure.
 
 Measurement is off unless SKILL_IMPROVER_JEV_EVAL names a file: then one JSON line per Jev call,
 nudge and queue write is appended there, and nothing else about the hook's behaviour changes.
@@ -15,6 +17,8 @@ nudge and queue write is appended there, and nothing else about the hook's behav
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import http.client
 import json
 import os
@@ -27,6 +31,11 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+
 PROVIDERS = {
     "openrouter": ("https://openrouter.ai/api/v1/systemone", "jev-1.13", "OPENROUTER_API_KEY"),
     "typesafe": ("https://api.typesafe.ai/v1/systemone", "jev-1.13.0", "TYPESAFE_API_KEY"),
@@ -38,10 +47,15 @@ COOLDOWN_S = 600
 MAX_NUDGES = 3
 MAX_CALLS = 30
 TIMEOUT_S = 2.0
+LOCK_TIMEOUT_S = 1.0
+STALE_S = 10
 STATE_TTL_S = 86400
 PAUSE_S = 1800
 STATE_VERSION = 1
 EVAL_ENV = "SKILL_IMPROVER_JEV_EVAL"
+EVENTS = (("PostToolUse", "Bash|Edit|Write|MultiEdit"), ("PostToolUseFailure", None), ("UserPromptSubmit", None))
+PROJECT_SETTINGS = (".claude/settings.json", ".claude/settings.local.json")
+USER_SETTINGS = Path.home() / ".claude" / "settings.json"
 
 QUESTION = (
     "Does this event history show a mistake, wrong assumption, drifted document or missing "
@@ -267,12 +281,45 @@ def call_jev(provider: str, key: str, body: dict, *, timeout: float = TIMEOUT_S,
     return float(score)
 
 
+# --- configuration as Claude Code sees it -------------------------------------
+
+def settings_env(project_dir: Path, user_settings: Path | None = None) -> dict:
+    """The `env` blocks Claude Code exports to hooks: user, project, then personal project settings."""
+    merged: dict = {}
+    for path in (user_settings or USER_SETTINGS, *(Path(project_dir) / rel for rel in PROJECT_SETTINGS)):
+        try:
+            block = json.loads(path.read_text(encoding="utf-8")).get("env", {})
+        except (OSError, ValueError, AttributeError):
+            continue
+        if isinstance(block, dict):
+            merged.update({k: v for k, v in block.items() if isinstance(v, str)})
+    return merged
+
+
+def registered_events(project_dir: Path) -> dict:
+    """{provider: {event, ...}} for every hook in the project's settings that runs this detector."""
+    found: dict = {}
+    for rel in PROJECT_SETTINGS:
+        try:
+            hooks = json.loads((Path(project_dir) / rel).read_text(encoding="utf-8")).get("hooks", {})
+            for event, groups in hooks.items():
+                for group in groups:
+                    for hook in group.get("hooks", []):
+                        match = re.search(r"lesson_detect\.py\"?\s+(\w+)", str(hook.get("command", "")))
+                        if match and match.group(1) in PROVIDERS:
+                            found.setdefault(match.group(1), set()).add(event)
+        except (OSError, ValueError, AttributeError, TypeError):
+            continue
+    return found
+
+
 # --- per-session state --------------------------------------------------------
 
 def new_state() -> dict:
     """An empty per-session state."""
     return {"v": STATE_VERSION, "window": [], "fired": [], "nudges": 0, "cooldown_until": 0,
-            "calls": 0, "errs": 0, "paused_until": 0, "blocked": False}
+            "calls": 0, "errs": 0, "paused_until": 0, "blocked": False, "last": None, "project": "",
+            "pending": []}
 
 
 def load_state(path: Path, *, now: float) -> dict:
@@ -302,16 +349,85 @@ def save_state(path: Path, state: dict) -> None:
         raise
 
 
+@contextlib.contextmanager
+def locked(path: Path, *, timeout: float = LOCK_TIMEOUT_S):
+    """Serialise one read-modify-write of `path` across parallel hooks. Yields False on timeout.
+
+    Without fcntl (Windows), or where the filesystem refuses flock, this yields True unlocked, so
+    parallel hooks can race and at worst lose an event.
+    """
+    if fcntl is None:
+        yield True
+        return
+    lock = path.with_suffix(".lock")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    except OSError:
+        yield False
+        return
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fd = os.open(str(lock), os.O_RDWR | os.O_CREAT, 0o600)
+        except OSError:
+            yield False
+            return
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(fd)
+            if time.monotonic() >= deadline:
+                yield False
+                return
+            time.sleep(0.01)
+            continue
+        except OSError:
+            os.close(fd)
+            yield True
+            return
+        if _is_current(fd, lock):
+            break
+        os.close(fd)  # the sweep reaped this inode between our open and our flock
+    try:
+        yield True
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def _is_current(fd: int, lock: Path) -> bool:
+    try:
+        on_disk, held = os.stat(str(lock)), os.fstat(fd)
+    except OSError:
+        return False
+    return (on_disk.st_dev, on_disk.st_ino) == (held.st_dev, held.st_ino)
+
+
+def _reap_lock(lock: Path) -> None:
+    """Unlink a lock only while holding it; a waiter on the old inode then sees it is not current."""
+    fd = os.open(str(lock), os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if _is_current(fd, lock):
+            lock.unlink()
+    finally:
+        os.close(fd)
+
+
 def default_state_dir() -> Path:
     """Per-user temp directory: never in the repo, reaped by the OS."""
     return Path(tempfile.gettempdir()) / ("skill-improver-jev-%d" % getattr(os, "getuid", lambda: 0)())
 
 
 def _sweep(state_dir: Path, now: float) -> None:
-    for old in state_dir.glob("*.json"):
+    for old in (*state_dir.glob("*.json"), *state_dir.glob("*.lock")):
         try:
-            if now - old.stat().st_mtime > STATE_TTL_S:
+            if now - old.stat().st_mtime <= STATE_TTL_S:
+                continue
+            if old.suffix != ".lock":
                 old.unlink()
+            elif fcntl is not None:
+                _reap_lock(old)
         except OSError:
             pass
 
@@ -361,7 +477,10 @@ def _context(event: str, text: str) -> dict:
 
 def _on_error(exc: JevError, event: str, provider: str, state: dict, now: float) -> dict | None:
     if exc.kind in ("credit", "auth"):
+        already = state["blocked"]
         state["blocked"] = True
+        if already:
+            return None
         why = "has no credit left" if exc.kind == "credit" else "rejected the API key"
         return _context(event, (
             f"Jev-assisted lesson detection is paused: {provider} {why}. The lessons loop itself is "
@@ -382,29 +501,38 @@ def _save(path: Path, state: dict) -> bool:
     return True
 
 
-def _judge(event: str, ev: dict, state: dict, provider: str, key: str, path: Path,
-           now: float, transport, log=_noop) -> dict | None:
+def _reserve(ev: dict, state: dict, now: float) -> bool:
+    """Under the lock: claim one call from the budget, or say no."""
+    live = [t for t in state["pending"] if now - t < STALE_S]
+    state["errs"] += len(state["pending"]) - len(live)  # a reservation never settled: its hook was killed
+    state["pending"] = live
     if state["errs"] >= 3:
         state["paused_until"], state["errs"] = now + PAUSE_S, 0
     if state["blocked"] or now < state["paused_until"] or state["calls"] >= MAX_CALLS:
-        return None
-    sig = signature(ev)
-    if not eligible(sig, state, now=now):
-        return None
+        return False
+    if not eligible(signature(ev), state, now=now):
+        return False
     state["calls"] += 1
-    state["errs"] += 1  # cleared on success, so a hook killed mid-call still counts toward the pause
-    if not _save(path, state):
-        return None
-    body = build_body(PROVIDERS[provider][1], state["window"], ev["k"])
-    try:
-        score = transport(provider, key, body)
-    except JevError as exc:
+    state["pending"].append(now)
+    return True
+
+
+def _settle(event: str, ev: dict, state: dict, provider: str, score: float | None,
+            exc: JevError | None, now: float, log=_noop) -> dict | None:
+    """Under the lock, on freshly re-read state: record the outcome and decide the nudge."""
+    if now in state["pending"]:
+        state["pending"].remove(now)
+    if exc is not None:
+        state["errs"] += 1
+        state["last"] = {"t": int(now), "outcome": "error:" + exc.kind}
         log({"e": "call", "trigger": ev["k"], "outcome": "error:" + exc.kind})
         return _on_error(exc, event, provider, state, now)
     state["errs"] = 0
-    log({"e": "call", "trigger": ev["k"], "score": round(score, 3),
-         "outcome": "positive" if score >= WORTHY_MIN else "negative"})
-    if score < WORTHY_MIN:
+    outcome = "positive" if score >= WORTHY_MIN else "negative"
+    state["last"] = {"t": int(now), "outcome": outcome}
+    log({"e": "call", "trigger": ev["k"], "score": round(score, 3), "outcome": outcome})
+    sig = signature(ev)
+    if score < WORTHY_MIN or not eligible(sig, state, now=now):
         return None
     mark_fired(state, sig, now=now)
     log({"e": "nudge", "trigger": ev["k"], "events": len(state["window"])})
@@ -436,23 +564,137 @@ def run(event: str, payload: dict, provider: str, *, env: dict, project_dir: Pat
     ev = _scrub(ev, key)
     session = re.sub(r"[^\w.-]", "_", str(payload.get("session_id") or "nosession"))[:64]
     path = state_dir / (session + ".json")
-    state = load_state(path, now=now)
-    state["window"] = push(state["window"], ev)
-    if not _save(path, state):
-        return None
+    with locked(path) as ok:
+        if not ok:
+            return None
+        state = load_state(path, now=now)
+        state["project"] = state["project"] or str(Path(project_dir).resolve())
+        state["window"] = push(state["window"], ev)
+        call = ev["k"] in ("fail", "prompt") and _reserve(ev, state, now)
+        if not _save(path, state):
+            return None
+        window = list(state["window"])
+    corpus = env.get("SKILL_IMPROVER_JEV_CORPUS")
+    if corpus and ev["k"] in ("fail", "prompt"):
+        try:
+            fd = os.open(str(Path(project_dir) / corpus), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            with os.fdopen(fd, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"t": int(now), "g": capture_group(project_dir, session),
+                                         "trigger": ev["k"], "window": window}) + "\n")
+        except OSError:
+            pass
     log = eval_logger(env, project_dir, session[:36], now)
     if ev["k"] == "edit" and os.path.basename(ev["key"]) == "lessons.md":
         log({"e": "queue_write", "titles": queue_titles(payload["tool_input"])})
     out = None
-    if ev["k"] in ("fail", "prompt"):
-        out = _judge(event, ev, state, provider, key, path, now, transport, log)
-        _save(path, state)
+    if call:
+        score, exc = None, None
+        try:
+            score = transport(provider, key, build_body(PROVIDERS[provider][1], window, ev["k"]))
+        except JevError as caught:
+            exc = caught
+        with locked(path) as ok:
+            if ok:
+                state = load_state(path, now=now)
+                out = _settle(event, ev, state, provider, score, exc, now, log)
+                _save(path, state)
     _sweep(state_dir, now)
     return out
 
 
+def capture_group(project_dir: Path, session: str) -> str:
+    """An opaque id shared by every window one session captures, so a benchmark can keep them together."""
+    return hashlib.sha256(f"{Path(project_dir).resolve()}\0{session}".encode("utf-8")).hexdigest()[:12]
+
+
+def status(provider: str | None, *, env: dict, project_dir: Path, state_dir: Path, now: float,
+           probe: bool, transport=call_jev, user_settings: Path | None = None) -> tuple[int, str]:
+    """(exit code, report) for this project's detector over the last STATE_TTL_S. Never prints a key.
+
+    Registration is checked first: a key and a reachable provider say nothing about whether the
+    hooks run. The key is looked up as the hooks see it, with the settings `env` blocks merged in.
+    """
+    lines, problems = [], 0
+    registered = registered_events(project_dir)
+    if provider is None and len(registered) == 1:
+        provider = next(iter(registered))
+    if provider is None:
+        if registered:
+            lines.append(f"hooks: registered for {' and '.join(sorted(registered))} — name one: --status <provider>")
+        else:
+            lines.append("hooks: not registered in .claude/settings.json or settings.local.json — detection is off "
+                         "(enable it with seed_lessons.py --jev-provider openrouter|typesafe)")
+        return 1, "\n".join(lines)
+    missing = [event for event, _ in EVENTS if event not in registered.get(provider, set())]
+    if provider not in registered:
+        lines.append(f"hooks: not registered for {provider} — detection through it is off")
+        problems += 1
+    elif missing:
+        lines.append(f"hooks: {provider} is registered without {', '.join(missing)}")
+        problems += 1
+    else:
+        lines.append(f"hooks: registered for {provider}")
+    hook_env = {**settings_env(project_dir, user_settings), **{k: v for k, v in env.items() if v}}
+    key = find_key(provider, hook_env, project_dir)
+    if not key:
+        lines.append(f"key: no {PROVIDERS[provider][2]} in the environment, Claude Code settings or .env")
+        problems += 1
+    else:
+        lines.append(f"key: found for {provider}")
+    sessions = []
+    for path in state_dir.glob("*.json"):
+        data = load_state(path, now=now)
+        if data.get("project") == str(Path(project_dir).resolve()):
+            sessions.append(data)
+    calls = sum(s["calls"] for s in sessions)
+    nudges = sum(s["nudges"] for s in sessions)
+    lines.append(f"last 24h: {len(sessions)} session(s), {calls} call(s), {nudges} nudge(s)")
+    if not sessions:
+        lines.append("no detector hook has run here in the last 24h — use a new Claude Code session, then rerun")
+        problems += 1
+    lasts = sorted((s["last"] for s in sessions if s.get("last")), key=lambda r: r["t"])
+    if lasts:
+        lines.append(f"last call: {int(now) - lasts[-1]['t']}s ago, {lasts[-1]['outcome']}")
+        if lasts[-1]["outcome"].startswith("error:"):
+            problems += 1
+    blocked = sum(1 for s in sessions if s["blocked"])
+    if blocked:
+        lines.append(f"{blocked} session(s) paused by a credit or auth error")
+        problems += 1
+    if probe and key:
+        try:
+            transport(provider, key, build_body(PROVIDERS[provider][1], [{"k": "ok", "key": "probe"}], "fail"))
+            lines.append("probe: ok")
+        except JevError as exc:
+            lines.append(f"probe: {exc.kind}")
+            problems += 1
+    return (1 if problems else 0), "\n".join(lines)
+
+
+def _status_cli(args: list[str]) -> int:
+    unknown = next((a for a in args if a != "--probe" and a not in PROVIDERS), None)
+    if unknown is not None:
+        print(f"status: unknown argument {unknown}", file=sys.stderr)
+        return 1
+    try:
+        provider = next((a for a in args if a in PROVIDERS), None)
+        project = Path(os.environ.get("CLAUDE_PROJECT_DIR") or ".").resolve()
+        rc, text = status(provider, env=dict(os.environ), project_dir=project,
+                          state_dir=default_state_dir(), now=time.time(), probe="--probe" in args)
+    except Exception as exc:  # type name only: str(exc) could carry a key
+        print(f"status: internal error ({type(exc).__name__})", file=sys.stderr)
+        return 1
+    print(text)
+    return rc
+
+
 def main() -> int:
-    """Entry point: `lesson_detect.py <provider>` with the hook payload on stdin. Always exits 0."""
+    """Entry point: `lesson_detect.py <provider>` with the hook payload on stdin. Always exits 0.
+
+    `--status` is the exception and never fails open: see `_status_cli`.
+    """
+    if len(sys.argv) > 1 and sys.argv[1] == "--status":
+        return _status_cli(sys.argv[2:])
     try:
         provider = sys.argv[1] if len(sys.argv) > 1 else ""
         if provider not in PROVIDERS:

@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -82,25 +83,32 @@ def default_branch(clone: Path) -> str | None:
     return None
 
 
-def latest_manifest(clone: Path, fetch: bool):
-    """Return the newest marketplace.json the source knows about.
+def version_key(v: str) -> tuple[int, ...] | None:
+    """Numeric dotted version ('v1.2', '1.10.0') as a tuple; None for anything else."""
+    m = re.fullmatch(r"v?(\d+(?:\.\d+)*)", v.strip())
+    return tuple(int(x) for x in m.group(1).split(".")) if m else None
 
-    Prefer the freshly-fetched origin copy so we compare against what the user
-    *would* get on update, not a stale local checkout. Fall back to the
-    working-tree file if git isn't usable here.
+
+def latest_manifest(clone: Path, fetch: bool):
+    """Return (manifest, stale): the newest marketplace.json the source knows about.
+
+    stale is True when a git clone was asked to fetch and could not, so origin/<branch> is
+    whatever was fetched last. Snapshots (no .git) have nothing to fetch and are never stale.
     """
     manifest_rel = ".claude-plugin/marketplace.json"
-    if fetch:
-        run_git(["fetch", "--quiet", "origin"], cwd=clone)
+    stale = False
+    if fetch and (clone / ".git").exists():
+        ok, _ = run_git(["fetch", "--quiet", "origin"], cwd=clone)
+        stale = not ok
     branch = default_branch(clone)
     if branch:
         ok, blob = run_git(["show", f"origin/{branch}:{manifest_rel}"], cwd=clone)
         if ok and blob:
             try:
-                return json.loads(blob)
+                return json.loads(blob), stale
             except json.JSONDecodeError:
                 pass
-    return load_json(clone / manifest_rel)
+    return load_json(clone / manifest_rel), stale
 
 
 def declared_source_id(plugin_entry: dict):
@@ -199,6 +207,11 @@ def compare(installed_ver, installed_sha, latest_ver, latest_sha):
         and installed_ver != "unknown" and latest_ver != "unknown"
     )
     if vers_known:
+        a, b = version_key(installed_ver), version_key(latest_ver)
+        if a is not None and b is not None:
+            width = max(len(a), len(b))
+            a, b = a + (0,) * (width - len(a)), b + (0,) * (width - len(b))
+            return "up-to-date" if a >= b else "update-available"
         return "up-to-date" if installed_ver == latest_ver else "update-available"
     if installed_sha and latest_sha:
         return "up-to-date" if installed_sha == latest_sha else "update-available"
@@ -227,6 +240,7 @@ def scan_plugins(claude_dir: Path, fetch: bool):
     head_cache: dict[str, str | None] = {}
     tags_cache: dict[str, dict | None] = {}
     snapshot_cache: dict[str, tuple | None] = {}
+    stale_cache: dict[str, bool] = {}
 
     def snapshot_info(market_name: str):
         """(gcs_sha, mtime) of a snapshot marketplace's marker file, or None."""
@@ -250,7 +264,7 @@ def scan_plugins(claude_dir: Path, fetch: bool):
         loc = info.get("installLocation")
         repo = (info.get("source") or {}).get("repo")
         # latest_manifest() runs the fetch; cache HEAD in the same pass.
-        m = latest_manifest(Path(loc), fetch) if loc else None
+        m, stale_cache[market_name] = latest_manifest(Path(loc), fetch) if loc else (None, False)
         head_cache[market_name] = market_head_sha(Path(loc), repo, fetch) if loc else None
         manifest_cache[market_name] = m
         return m
@@ -359,6 +373,9 @@ def scan_plugins(claude_dir: Path, fetch: bool):
                 note = ("compared against the marketplace repo's HEAD (the plugin "
                         "pins no version/sha of its own) — any commit in that repo "
                         "advances it, so this plugin's own content may be unchanged")
+            if stale_cache.get(market) and status != "unknown":
+                status = "unknown"
+                note = "could not fetch the marketplace; its last fetched state may be stale"
             results.append(
                 {
                     "kind": "plugin",

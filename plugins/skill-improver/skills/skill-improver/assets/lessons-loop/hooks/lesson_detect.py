@@ -44,7 +44,8 @@ COOLDOWN_S = 600
 MAX_NUDGES = 3
 MAX_CALLS = 30
 TIMEOUT_S = 2.0
-LOCK_TIMEOUT_S = 0.5
+LOCK_TIMEOUT_S = 1.0
+STALE_S = 10
 STATE_TTL_S = 86400
 PAUSE_S = 1800
 STATE_VERSION = 1
@@ -279,7 +280,8 @@ def call_jev(provider: str, key: str, body: dict, *, timeout: float = TIMEOUT_S,
 def new_state() -> dict:
     """An empty per-session state."""
     return {"v": STATE_VERSION, "window": [], "fired": [], "nudges": 0, "cooldown_until": 0,
-            "calls": 0, "errs": 0, "paused_until": 0, "blocked": False, "last": None, "project": ""}
+            "calls": 0, "errs": 0, "paused_until": 0, "blocked": False, "last": None, "project": "",
+            "pending": []}
 
 
 def load_state(path: Path, *, now: float) -> dict:
@@ -313,7 +315,8 @@ def save_state(path: Path, state: dict) -> None:
 def locked(path: Path, *, timeout: float = LOCK_TIMEOUT_S):
     """Serialise one read-modify-write of `path` across parallel hooks. Yields False on timeout.
 
-    Without fcntl (Windows) this yields True unlocked: v1.3.1 behaviour, at worst one lost event.
+    Without fcntl (Windows), or where the filesystem refuses flock, this yields True unlocked, so
+    parallel hooks can race and at worst lose an event.
     """
     if fcntl is None:
         yield True
@@ -335,6 +338,9 @@ def locked(path: Path, *, timeout: float = LOCK_TIMEOUT_S):
                     yield False
                     return
                 time.sleep(0.01)
+            except OSError:
+                yield True
+                return
         try:
             yield True
         finally:
@@ -351,8 +357,14 @@ def default_state_dir() -> Path:
 def _sweep(state_dir: Path, now: float) -> None:
     for old in (*state_dir.glob("*.json"), *state_dir.glob("*.lock")):
         try:
-            if now - old.stat().st_mtime > STATE_TTL_S:
-                old.unlink()
+            if now - old.stat().st_mtime <= STATE_TTL_S:
+                continue
+            if old.suffix == ".lock":
+                # flock never touches the mtime, so only reap a lock whose session state is gone or stale
+                sibling = old.with_suffix(".json")
+                if sibling.exists() and now - sibling.stat().st_mtime <= STATE_TTL_S:
+                    continue
+            old.unlink()
         except OSError:
             pass
 
@@ -402,7 +414,10 @@ def _context(event: str, text: str) -> dict:
 
 def _on_error(exc: JevError, event: str, provider: str, state: dict, now: float) -> dict | None:
     if exc.kind in ("credit", "auth"):
+        already = state["blocked"]
         state["blocked"] = True
+        if already:
+            return None
         why = "has no credit left" if exc.kind == "credit" else "rejected the API key"
         return _context(event, (
             f"Jev-assisted lesson detection is paused: {provider} {why}. The lessons loop itself is "
@@ -425,6 +440,9 @@ def _save(path: Path, state: dict) -> bool:
 
 def _reserve(ev: dict, state: dict, now: float) -> bool:
     """Under the lock: claim one call from the budget, or say no."""
+    live = [t for t in state["pending"] if now - t < STALE_S]
+    state["errs"] += len(state["pending"]) - len(live)  # a reservation never settled: its hook was killed
+    state["pending"] = live
     if state["errs"] >= 3:
         state["paused_until"], state["errs"] = now + PAUSE_S, 0
     if state["blocked"] or now < state["paused_until"] or state["calls"] >= MAX_CALLS:
@@ -432,14 +450,17 @@ def _reserve(ev: dict, state: dict, now: float) -> bool:
     if not eligible(signature(ev), state, now=now):
         return False
     state["calls"] += 1
-    state["errs"] += 1  # cleared on success, so a hook killed mid-call still counts toward the pause
+    state["pending"].append(now)
     return True
 
 
 def _settle(event: str, ev: dict, state: dict, provider: str, score: float | None,
             exc: JevError | None, now: float, log=_noop) -> dict | None:
     """Under the lock, on freshly re-read state: record the outcome and decide the nudge."""
+    if now in state["pending"]:
+        state["pending"].remove(now)
     if exc is not None:
+        state["errs"] += 1
         state["last"] = {"t": int(now), "outcome": "error:" + exc.kind}
         log({"e": "call", "trigger": ev["k"], "outcome": "error:" + exc.kind})
         return _on_error(exc, event, provider, state, now)

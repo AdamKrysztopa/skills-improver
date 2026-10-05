@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import errno
 import importlib.util
 import json
+import os
 from pathlib import Path
 import tempfile
 import threading
@@ -85,6 +87,53 @@ class Concurrency(unittest.TestCase):
         with mock.patch.object(D, "fcntl", None):
             self.fire([bash_ok(0)])
         self.assertEqual(len(_plain_load(self.state / "s1.json", self.now)["window"]), 1)
+
+    def test_in_flight_calls_are_not_errors(self):
+        calls = []
+
+        def transport(*args):
+            calls.append(1)
+            time.sleep(0.3)
+            return 0.1
+
+        self.fire([bash_fail(i) for i in range(4)], transport)
+        state = _plain_load(self.state / "s1.json", self.now)
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(state["paused_until"], 0)
+        self.assertEqual(state["pending"], [])
+
+    def test_a_stale_reservation_becomes_one_error(self):
+        state = D.new_state()
+        state["pending"] = [self.now - D.STALE_S, self.now - 1]
+        ev = {"k": "fail", "key": "Bash", "err": "x"}
+        D._reserve(ev, state, self.now)
+        self.assertEqual(state["errs"], 1)
+        self.assertEqual(len(state["pending"]), 2)
+
+    def test_a_lock_beside_a_live_state_file_survives_the_sweep(self):
+        self.state.mkdir(parents=True)
+        lock, live, dead = (self.state / n for n in ("a.lock", "a.json", "b.lock"))
+        for f in (lock, live, dead):
+            f.write_text("")
+        old = self.now - D.STATE_TTL_S - 10
+        for f in (lock, dead):
+            os.utime(f, (old, old))
+        D._sweep(self.state, self.now)
+        self.assertTrue(lock.exists())
+        self.assertFalse(dead.exists())
+
+    def test_a_filesystem_without_flock_runs_unlocked(self):
+        with mock.patch.object(D.fcntl, "flock", side_effect=OSError(errno.ENOLCK, "no locks")):
+            self.fire([bash_ok(0)])
+        self.assertEqual(len(_plain_load(self.state / "s1.json", self.now)["window"]), 1)
+
+    def test_parallel_auth_failures_warn_once(self):
+        def transport(*args):
+            time.sleep(0.2)
+            raise D.JevError("auth")
+
+        outs = self.fire([bash_fail(i) for i in range(2)], transport)
+        self.assertEqual(sum(o is not None for o in outs), 1)
 
 
 def _plain_load(path: Path, now: float) -> dict:

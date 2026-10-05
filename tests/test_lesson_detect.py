@@ -284,7 +284,8 @@ class IoTests(unittest.TestCase):
             with self.assertRaises(Killed):
                 self.run_hook("PostToolUseFailure", fail_payload(err="Exit code 1\nk%d" % i), killed)
         t = FakeTransport(0.9)
-        self.assertIsNone(self.run_hook("PostToolUseFailure", fail_payload(err="Exit code 1\nafter"), t))
+        self.assertIsNone(self.run_hook("PostToolUseFailure", fail_payload(err="Exit code 1\nafter"), t,
+                                         now=self.now + D.STALE_S))
         self.assertEqual(t.bodies, [])
 
     def test_save_failure_leaves_no_temp_file_behind(self):

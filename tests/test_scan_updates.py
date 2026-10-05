@@ -82,3 +82,27 @@ class StaleFetch(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Helpers(unittest.TestCase):
+    def test_declared_source_id(self):
+        self.assertEqual(U.declared_source_id({"version": "1.0", "source": "./p"}), ("1.0", None, True, None))
+        self.assertEqual(U.declared_source_id({"source": {"url": "u", "sha": "s", "ref": "v2"}}),
+                         ("v2", "s", False, "u"))
+
+    def test_folders_differ(self):
+        with tempfile.TemporaryDirectory() as t:
+            a, b = Path(t, "a"), Path(t, "b")
+            a.mkdir(); b.mkdir()
+            (a / "SKILL.md").write_text("x"); (b / "SKILL.md").write_text("x")
+            self.assertFalse(U.folders_differ(a, b))
+            (b / "SKILL.md").write_text("y")
+            self.assertTrue(U.folders_differ(a, b))
+
+    def test_standalone_offline_is_unknown_not_current(self):
+        with tempfile.TemporaryDirectory() as t:
+            agents = Path(t)
+            (agents / ".skill-lock.json").write_text(json.dumps({"skills": {"s": {
+                "sourceUrl": "https://example.invalid/r.git", "skillPath": "skills/s/SKILL.md"}}}))
+            results = U.scan_standalone_skills(agents, fetch=False)
+            self.assertEqual({r["status"] for r in results}, {"unknown"})

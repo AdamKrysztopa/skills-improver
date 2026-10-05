@@ -158,7 +158,7 @@ What gets installed into your project, and why each piece is there:
 | the queue | `docs/lessons.md` | a short-lived working list. **Empty is healthy.** Entries are written the moment a mistake is caught, not at the end of a session — by then the bug is fixed and the reason is gone |
 | the archive | `docs/LESSONS-ARCHIVE.md` | one dated section per drain, one line per lesson, linked by six edge types. This is the loop's memory |
 | the hook | `.claude/hooks/session_start_lessons.py` | puts the archive's rules into every session automatically, so nobody has to open a file |
-| the checker | `scripts/lessons_graph.py` | fails (exit 1) on **oscillation** — a rule added, later removed as noise, later re-added — and on a rule **re-learned after it was applied**, which means it's in the wrong place, not that it's wrong |
+| the checker | `scripts/lessons_graph.py` | fails (exit 1) on **oscillation** — a rule added, later removed as noise, later re-added — and on a rule **re-learned after it was applied**, which means it's in the wrong place, not that it's wrong. It follows the `reverses` / `recurs` edges Claude declared when draining; it does not discover on its own that two lessons are the same mistake |
 | capture skill | `.claude/skills/lessons/` | fires when a mistake is caught. Writes one entry and **stops** |
 | drain skill | `.claude/skills/implement-ll/` | fires at a checkpoint. Groups the queue, routes each group to a hook / a CI check / a skill / CLAUDE.md, verifies it binds, archives it, empties the queue |
 

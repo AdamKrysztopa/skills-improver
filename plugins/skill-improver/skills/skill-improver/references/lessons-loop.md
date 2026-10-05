@@ -34,7 +34,7 @@ machinery fires.
 | the queue | `docs/lessons.md` | short-lived working list; **empty is the healthy state** |
 | the graph | `docs/LESSONS-ARCHIVE.md` | one dated section per drain, newest first; the loop's entire memory |
 | the hook | `.claude/hooks/session_start_lessons.py` | injects applied rules + queue depth into every session |
-| the checker | `scripts/lessons_graph.py` | oscillation, recurrence, dangling edges; exits 1 |
+| the checker | `scripts/lessons_graph.py` | oscillation and recurrence over the edges Claude declared, plus dangling edges; exits 1 |
 | capture skill | `.claude/skills/lessons/` | writes one entry and stops |
 | drain skill | `.claude/skills/implement-ll/` | groups, routes, applies, verifies, archives |
 
@@ -225,8 +225,8 @@ built.
   bundled one has no dependencies and reads one file, so there is rarely a reason to rewrite it.
 - **No hook mechanism** — inject via whatever file is loaded unconditionally at session start, and
   say plainly in the report that this is a weaker substitute that will decay.
-- **Monorepos** — one queue per team boundary, one shared archive. Recurrence across teams is the
-  most valuable signal the graph produces.
+- **Monorepos** — one queue per team boundary, one shared archive. Recurrence across teams, once
+  declared as a `recurs` edge, is the most valuable signal the graph produces.
 - **An existing retro process** — wire into it rather than replacing it. The queue is the artefact
   that matters; the ceremony around it can be whatever already exists.
 

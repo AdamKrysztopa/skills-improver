@@ -24,9 +24,11 @@ Three jobs:
    its own tooling gets better from the mistakes made while working in it,
    without anyone having to remember the machinery exists: a short-lived
    **queue**, a linked **archive** whose rules a SessionStart hook injects into
-   every session, a **graph checker** that fails on oscillation (a rule added,
-   removed, re-added) and on a rule re-learned after it was applied, and two
-   **skills** — one that captures at the moment a mistake is caught and stops,
+   every session, a **graph checker** over the `recurs` / `reverses` edges Claude
+   records when it drains the queue: it fails when a rule is reversed and
+   re-reversed (oscillation) or re-learned after it was applied. It checks the
+   relationships Claude declared; it does not discover on its own that two
+   lessons are the same mistake. Alongside them, two **skills** — one that captures at the moment a mistake is caught and stops,
    one that drains at a checkpoint and routes each lesson to the artefact that
    was actually running when the mistake happened. Paths adapt to the host
    project's conventions. `--seed-from-session` populates the queue from what

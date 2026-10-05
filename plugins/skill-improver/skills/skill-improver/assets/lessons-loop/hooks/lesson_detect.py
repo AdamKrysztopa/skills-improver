@@ -538,9 +538,54 @@ def run(event: str, payload: dict, provider: str, *, env: dict, project_dir: Pat
     return out
 
 
+def status(provider: str | None, *, env: dict, project_dir: Path, state_dir: Path, now: float,
+           probe: bool, transport=call_jev) -> tuple[int, str]:
+    """(exit code, report) for this project's detector over the last STATE_TTL_S. Never prints a key."""
+    lines, problems = [], 0
+    provider = provider or "openrouter"
+    key = find_key(provider, env, project_dir)
+    if not key:
+        lines.append(f"key: no {PROVIDERS[provider][2]} in the environment or .env")
+        problems += 1
+    else:
+        lines.append(f"key: found for {provider}")
+    sessions = []
+    for path in state_dir.glob("*.json"):
+        data = load_state(path, now=now)
+        if data.get("project") == str(Path(project_dir).resolve()):
+            sessions.append(data)
+    calls = sum(s["calls"] for s in sessions)
+    nudges = sum(s["nudges"] for s in sessions)
+    lines.append(f"last 24h: {len(sessions)} session(s), {calls} call(s), {nudges} nudge(s)")
+    lasts = sorted((s["last"] for s in sessions if s.get("last")), key=lambda r: r["t"])
+    if lasts:
+        lines.append(f"last call: {int(now) - lasts[-1]['t']}s ago, {lasts[-1]['outcome']}")
+        if lasts[-1]["outcome"].startswith("error:"):
+            problems += 1
+    blocked = sum(1 for s in sessions if s["blocked"])
+    if blocked:
+        lines.append(f"{blocked} session(s) paused by a credit or auth error")
+        problems += 1
+    if probe and key:
+        try:
+            transport(provider, key, build_body(PROVIDERS[provider][1], [{"k": "ok", "key": "probe"}], "fail"))
+            lines.append("probe: ok")
+        except JevError as exc:
+            lines.append(f"probe: {exc.kind}")
+            problems += 1
+    return (1 if problems else 0), "\n".join(lines)
+
+
 def main() -> int:
     """Entry point: `lesson_detect.py <provider>` with the hook payload on stdin. Always exits 0."""
     try:
+        if len(sys.argv) > 1 and sys.argv[1] == "--status":
+            provider = next((a for a in sys.argv[2:] if a in PROVIDERS), None)
+            project = Path(os.environ.get("CLAUDE_PROJECT_DIR") or ".").resolve()
+            rc, text = status(provider, env=dict(os.environ), project_dir=project,
+                              state_dir=default_state_dir(), now=time.time(), probe="--probe" in sys.argv)
+            print(text)
+            return rc
         provider = sys.argv[1] if len(sys.argv) > 1 else ""
         if provider not in PROVIDERS:
             return 0

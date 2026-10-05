@@ -57,7 +57,7 @@ def score_records(detector, records: list[dict]) -> list[dict]:
     """One call per record; a failed call is a miss (decision False) with its error kind recorded."""
     rows = []
     for rec in records:
-        row = {"id": rec["id"], "split": rec["split"], "label": rec["label"], "decision": False,
+        row = {"id": rec["id"], "group": rec["group"], "split": rec["split"], "label": rec["label"], "decision": False,
                "score": None, "latency_ms": None, "bytes_out": None, "error": None}
         try:
             row.update(detector(rec))
@@ -84,17 +84,27 @@ def confusion(rows: list[dict], threshold: float | None = None) -> dict:
     return {"tp": tp, "fp": fp, "fn": fn, "tn": tn}
 
 
+def _ratio(num: int, den: int) -> float | None:
+    return num / den if den else None
+
+
 def summarise(rows: list[dict], threshold: float | None = None) -> dict:
+    """Per-split metrics. Intervals resample whole capture groups: windows from one session are correlated."""
     c = confusion(rows, threshold)
     p, r, f1 = S.prf(c["tp"], c["fp"], c["fn"])
+    groups: dict = {}
+    for row in rows:
+        groups.setdefault(row["group"], []).append(row)
+    clusters = [tuple(confusion(g, threshold)[k] for k in ("tp", "fp", "fn")) for g in groups.values()]
     answered = [row for row in rows if row["error"] is None]
     latencies = [row["latency_ms"] for row in answered]
     negatives = c["fp"] + c["tn"]
     return {
-        "n": len(rows), **c,
+        "n": len(rows), "groups": len(groups), **c,
         "precision": p, "recall": r, "f1": f1,
-        "precision_ci": S.wilson(c["tp"], c["tp"] + c["fp"]),
-        "recall_ci": S.wilson(c["tp"], c["tp"] + c["fn"]),
+        "precision_ci": S.cluster_bootstrap(clusters, lambda tp, fp, fn: _ratio(tp, tp + fp)),
+        "recall_ci": S.cluster_bootstrap(clusters, lambda tp, fp, fn: _ratio(tp, tp + fn)),
+        "f1_ci": S.cluster_bootstrap(clusters, lambda tp, fp, fn: _ratio(2 * tp, 2 * tp + fp + fn)),
         "false_nudges_per_100": 100 * c["fp"] / negatives if negatives else None,
         "latency_p50_ms": S.percentile(latencies, 0.5) if latencies else None,
         "latency_p95_ms": S.percentile(latencies, 0.95) if latencies else None,
@@ -108,7 +118,8 @@ def best_threshold(dev_rows: list[dict]) -> float | None:
     scores = sorted({row["score"] for row in dev_rows if row["score"] is not None})
     best, best_f1 = None, -1.0
     for threshold in scores:
-        f1 = summarise(dev_rows, threshold)["f1"]
+        c = confusion(dev_rows, threshold)
+        f1 = S.prf(c["tp"], c["fp"], c["fn"])[2]
         if f1 >= best_f1:
             best, best_f1 = threshold, f1
     return best
@@ -131,9 +142,10 @@ def fmt(value, spec: str = ".2f") -> str:
 
 
 def print_table(detector: str, split: str, s: dict, label: str = "") -> None:
-    print("%-15s %-4s %-14s n=%-4d P=%s [%s-%s]  R=%s [%s-%s]  F1=%s  FalseNudge/100=%s  p50=%s p95=%s ms  bytes=%s  err=%d" % (
-        detector, split, label, s["n"], fmt(s["precision"]), fmt(s["precision_ci"][0]), fmt(s["precision_ci"][1]),
+    print("%-15s %-4s %-14s n=%-4d g=%-4d P=%s [%s-%s]  R=%s [%s-%s]  F1=%s [%s-%s]  FalseNudge/100=%s  p50=%s p95=%s ms  bytes=%s  err=%d" % (
+        detector, split, label, s["n"], s["groups"], fmt(s["precision"]), fmt(s["precision_ci"][0]), fmt(s["precision_ci"][1]),
         fmt(s["recall"]), fmt(s["recall_ci"][0]), fmt(s["recall_ci"][1]), fmt(s["f1"]),
+        fmt(s["f1_ci"][0]), fmt(s["f1_ci"][1]),
         fmt(s["false_nudges_per_100"], ".1f"), fmt(s["latency_p50_ms"], ".0f"), fmt(s["latency_p95_ms"], ".0f"),
         fmt(s["mean_bytes_out"], ".0f"), s["errors"]))
 

@@ -30,8 +30,9 @@ def record_id(window: list) -> str:
     return hashlib.sha1(window_key(window).encode("utf-8")).hexdigest()[:12]
 
 
-def split_for(rid: str) -> str:
-    return "test" if int(rid, 16) % 2 else "dev"
+def split_for(group: str) -> str:
+    """By capture group, never by window: a session's overlapping windows must not straddle dev and test."""
+    return "test" if int(group, 16) % 2 else "dev"
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -54,17 +55,23 @@ def write_jsonl(path: Path, rows: list[dict]) -> None:
 
 
 def merge_captures(raw_rows: list[dict], existing: list[dict]) -> list[dict]:
-    """Existing records first, untouched; then each previously unseen window once, unlabelled."""
+    """Existing records first, untouched; then each previously unseen window once, unlabelled.
+
+    Raises:
+        ValueError: A capture line has no session group `g` (captured before v1.4.0).
+    """
     out = list(existing)
     seen = {window_key(r["window"]) for r in out}
     for row in raw_rows:
+        if not row.get("g"):
+            raise ValueError("a capture line has no session group \"g\"; recapture with the current hook")
         key = window_key(row["window"])
         if key in seen:
             continue
         seen.add(key)
         rid = record_id(row["window"])
-        out.append({"id": rid, "trigger": row["trigger"], "window": row["window"],
-                    "label": None, "labeler": None, "split": split_for(rid)})
+        out.append({"id": rid, "group": row["g"], "trigger": row["trigger"], "window": row["window"],
+                    "label": None, "labeler": None, "split": split_for(row["g"])})
     return out
 
 

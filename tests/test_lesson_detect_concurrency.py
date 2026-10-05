@@ -110,17 +110,49 @@ class Concurrency(unittest.TestCase):
         self.assertEqual(state["errs"], 1)
         self.assertEqual(len(state["pending"]), 2)
 
-    def test_a_lock_beside_a_live_state_file_survives_the_sweep(self):
-        self.state.mkdir(parents=True)
-        lock, live, dead = (self.state / n for n in ("a.lock", "a.json", "b.lock"))
-        for f in (lock, live, dead):
-            f.write_text("")
+    def age(self, *paths):
         old = self.now - D.STATE_TTL_S - 10
-        for f in (lock, dead):
+        for f in paths:
             os.utime(f, (old, old))
+
+    def test_a_held_lock_survives_the_sweep_and_still_excludes(self):
+        target = self.state / "a.json"
+        with D.locked(target) as first:
+            self.assertTrue(first)
+            lock = target.with_suffix(".lock")
+            inode = lock.stat().st_ino
+            self.age(lock)
+            D._sweep(self.state, self.now)
+            self.assertEqual(lock.stat().st_ino, inode)
+            with D.locked(target, timeout=0.05) as second:
+                self.assertFalse(second)
+
+    def test_an_unheld_stale_lock_is_reaped(self):
+        self.state.mkdir(parents=True)
+        lock = self.state / "b.lock"
+        lock.write_text("")
+        self.age(lock)
         D._sweep(self.state, self.now)
-        self.assertTrue(lock.exists())
-        self.assertFalse(dead.exists())
+        self.assertFalse(lock.exists())
+
+    def test_a_waiter_on_a_reaped_inode_locks_the_current_file(self):
+        target = self.state / "c.json"
+        lock = target.with_suffix(".lock")
+        real, reaped = D.fcntl.flock, []
+
+        def reap_first(fd, op):
+            if not reaped and op & D.fcntl.LOCK_EX:
+                reaped.append(True)
+                D._reap_lock(lock)
+            return real(fd, op)
+
+        with mock.patch.object(D.fcntl, "flock", reap_first):
+            with D.locked(target) as first:
+                self.assertTrue(first)
+                self.assertTrue(lock.exists())
+                with D.locked(target, timeout=0.05) as second:
+                    self.assertFalse(second)
+        self.assertEqual(reaped, [True])
 
     def test_a_filesystem_without_flock_runs_unlocked(self):
         with mock.patch.object(D.fcntl, "flock", side_effect=OSError(errno.ENOLCK, "no locks")):

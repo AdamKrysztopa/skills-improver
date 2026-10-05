@@ -21,6 +21,17 @@ class StatsTests(unittest.TestCase):
         self.assertEqual(S.prf(0, 0, 0), (0.0, 0.0, 0.0))
         self.assertEqual(S.prf(0, 3, 4), (0.0, 0.0, 0.0))
 
+    def test_cluster_bootstrap(self):
+        ratio = lambda k, n: k / n if n else None
+        self.assertEqual(S.cluster_bootstrap([(3, 3)] * 5, ratio), (1.0, 1.0))
+        self.assertEqual(S.cluster_bootstrap([], ratio), (0.0, 1.0))
+        self.assertEqual(S.cluster_bootstrap([(0, 0)], ratio), (0.0, 1.0))
+        mixed = [(5, 5), (0, 5)] * 4
+        lo, hi = S.cluster_bootstrap(mixed, ratio)
+        self.assertLess(lo, 0.5)
+        self.assertGreater(hi, 0.5)
+        self.assertEqual((lo, hi), S.cluster_bootstrap(mixed, ratio))
+
     def test_wilson(self):
         self.assertEqual(S.wilson(0, 10)[0], 0.0)
         lo, hi = S.wilson(5, 10)

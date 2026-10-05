@@ -38,7 +38,7 @@ machinery fires.
 | capture skill | `.claude/skills/lessons/` | writes one entry and stops |
 | drain skill | `.claude/skills/implement-ll/` | groups, routes, applies, verifies, archives |
 
-The hook restates only the rules that still need the model's judgment. A rule whose home is a hook, test or CI gate is enforced without anyone remembering it, so it is listed by id with a pointer to its archive row instead of being repeated. Rules homed in prose, in several files, or in a path that only resembles a gate (`src/webhooks/retry.py`, `docs/hooks.rst`), are still injected in full.
+The hook restates only the rules that still need the model's judgment. A rule whose home is a safeguard that exists and is known to run — a Claude Code hook registered in `.claude/settings*.json`, an executable git hook, an installed pre-commit config, a CI workflow, a test — is enforced without anyone remembering it, so it is listed by id with a pointer to its archive row instead of being repeated. Rules homed in prose, in several files, in a path that only resembles a gate (`src/webhooks/retry.py`, `docs/hooks.rst`), in a Makefile or task runner someone must invoke, or in a safeguard that is missing or unregistered, are still injected in full.
 
 The installer detects the host's conventions (`doc/` vs `docs/`, `bin/` vs `scripts/`, an existing
 `tests/`) and retargets every path inside the scripts, the skills and the prose. Names adapt; the

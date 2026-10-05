@@ -36,7 +36,7 @@ CORPUS = [
 
 
 def record(rid, split, label, window):
-    return {"id": rid, "trigger": window[-1]["k"], "window": window, "label": label,
+    return {"id": rid, "group": "g-" + rid, "trigger": window[-1]["k"], "window": window, "label": label,
             "labeler": "A", "split": split}
 
 
@@ -75,11 +75,22 @@ class RunTests(unittest.TestCase):
         self.assertEqual((dev["errors"], dev["mean_bytes_out"]), (0, 0))
         self.assertIn("heuristic", printed)
 
+    def test_intervals_resample_capture_groups_not_windows(self):
+        rows = [{"group": "g%d" % (i // 5), "label": True, "decision": i // 5 % 2 == 0, "score": None,
+                 "error": None, "latency_ms": 1, "bytes_out": 0} for i in range(40)]
+        grouped = R.summarise(rows)
+        for row in rows:
+            row["group"] = row["group"] + "-" + str(id(row))
+        independent = R.summarise(rows)
+        self.assertEqual((grouped["groups"], independent["groups"]), (8, 40))
+        width = lambda ci: ci[1] - ci[0]
+        self.assertGreater(width(grouped["recall_ci"]), width(independent["recall_ci"]))
+
     def test_raw_rows_and_provenance(self):
         summary, _ = self.run_main()
         rows = [json.loads(line) for line in (self.out / "heuristic.jsonl").read_text().splitlines()]
         self.assertEqual(len(rows), 6)
-        self.assertEqual(set(rows[0]), {"id", "split", "label", "decision", "score", "latency_ms", "bytes_out", "error"})
+        self.assertEqual(set(rows[0]), {"id", "group", "split", "label", "decision", "score", "latency_ms", "bytes_out", "error"})
         self.assertEqual({r["id"]: r["decision"] for r in rows},
                          {"r1": True, "r2": True, "r3": True, "r4": False, "r5": False, "r6": False})
         self.assertIn("UTC", summary["date_utc"])
@@ -124,7 +135,7 @@ class RunTests(unittest.TestCase):
 
     def test_jev_threshold_selection_and_rescoring(self):
         def row(label, score):
-            return {"label": label, "score": score, "decision": score is not None and score >= 0.6,
+            return {"group": "g", "label": label, "score": score, "decision": score is not None and score >= 0.6,
                     "error": None if score is not None else "transient", "latency_ms": 1.0, "bytes_out": 1}
 
         dev = [row(True, 0.9), row(True, 0.5), row(False, 0.4), row(False, 0.1), row(True, None)]

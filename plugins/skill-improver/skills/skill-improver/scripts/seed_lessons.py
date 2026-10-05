@@ -29,6 +29,7 @@ import re
 import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ASSETS = Path(__file__).resolve().parent.parent / "assets" / "lessons-loop"
@@ -48,8 +49,6 @@ CHECKPOINT_HINTS = (
 
 JEV_PROVIDERS = ("openrouter", "typesafe")
 JEV_LABEL = {"openrouter": "OpenRouter", "typesafe": "TypeSafe (direct)"}
-JEV_EVENTS = (("PostToolUse", "Bash|Edit|Write|MultiEdit"), ("PostToolUseFailure", None),
-              ("UserPromptSubmit", None))
 JEV_STATUS = {
     "credit": "key found, but the account has no credit — detection stays paused and warns once",
     "auth": "key found, but the provider rejected it — detection stays paused and warns once",
@@ -269,9 +268,9 @@ class Journal:
         n = 0
         while True:
             candidate = path.with_name(path.name + ".bak" + (f".{n}" if n else ""))
-            if not candidate.exists():
+            if not os.path.lexists(candidate):
                 return candidate
-            if candidate.read_bytes() == prior:
+            if not candidate.is_symlink() and candidate.read_bytes() == prior:
                 return None
             n += 1
 
@@ -290,16 +289,10 @@ class Journal:
         self._mkdirs(path.parent)
         bak = self._backup_for(path, prior) if prior is not None and backup else None
         if bak:
-            bak.write_bytes(prior)
-        tmp = path.with_name(path.name + ".tmp")
+            _create_new(bak, prior)
         try:
-            fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(text)
-            tmp.chmod(mode if mode is not None else prior_mode)
-            os.replace(tmp, path)
+            _replace_with(path, text.encode("utf-8"), mode if mode is not None else prior_mode)
         except BaseException:
-            tmp.unlink(missing_ok=True)
             if bak:
                 bak.unlink(missing_ok=True)
             raise
@@ -310,8 +303,7 @@ class Journal:
             if prior is None:
                 path.unlink(missing_ok=True)
             else:
-                path.write_bytes(prior)
-                path.chmod(mode)
+                _replace_with(path, prior, mode)
             if bak:
                 bak.unlink(missing_ok=True)
         for directory in reversed(self._dirs):
@@ -320,6 +312,26 @@ class Journal:
             except OSError:
                 pass
         self._undo, self._dirs = [], []
+
+
+def _create_new(path: Path, data: bytes) -> None:
+    """Write a file that must not exist yet: O_EXCL refuses a planted file or symlink at `path`."""
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(data)
+
+
+def _replace_with(path: Path, data: bytes, mode: int) -> None:
+    """Atomically replace `path` via a randomly named sibling that no pre-existing link can occupy."""
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 # --- settings.json ----------------------------------------------------------
@@ -400,15 +412,7 @@ def load_detector():
 
 def settings_env(root: Path) -> dict:
     """The `env` blocks Claude Code exports to hooks: user, project, then personal project settings."""
-    merged: dict = {}
-    for path in (USER_CLAUDE_DIR / "settings.json", root / ".claude" / "settings.json", root / LOCAL_SETTINGS):
-        try:
-            block = json.loads(path.read_text(encoding="utf-8")).get("env", {})
-        except (OSError, ValueError, AttributeError):
-            continue
-        if isinstance(block, dict):
-            merged.update({k: v for k, v in block.items() if isinstance(v, str)})
-    return merged
+    return load_detector().settings_env(root, USER_CLAUDE_DIR / "settings.json")
 
 
 def find_jev_key(provider: str, root: Path) -> tuple[str | None, str]:
@@ -452,7 +456,7 @@ def _strip_detector(hooks: dict) -> None:
 
 
 def _is_registered(hooks: dict, command: str) -> bool:
-    for event, matcher in JEV_EVENTS:
+    for event, matcher in load_detector().EVENTS:
         found = any(g.get("matcher") == matcher and any(h.get("command") == command for h in g.get("hooks", []))
                     for g in hooks.get(event, []))
         if not found:
@@ -486,7 +490,7 @@ def jev_settings_action(lay: Layout, provider: str) -> tuple[str, dict]:
         if not hooks:
             del settings["hooks"]
         return ("remove Jev hooks" if had_any else "not registered", settings)
-    for event, matcher in JEV_EVENTS:
+    for event, matcher in load_detector().EVENTS:
         group = {"hooks": [{"type": "command", "command": command, "timeout": 5}]}
         if matcher:
             group = {"matcher": matcher, **group}

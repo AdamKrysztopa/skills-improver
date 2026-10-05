@@ -4,7 +4,7 @@ Does the optional Jev hook earn its place? Four detectors are scored on one labe
 
 ## 1. Capture
 
-Set `SKILL_IMPROVER_JEV_CORPUS` to a file path (relative to the project root, or absolute) in the environment of at least 3 real projects for at least 2 weeks. The hook appends one redacted `{"t", "trigger", "window"}` line per `fail` or `prompt` event, file mode `0600`. Unset, nothing is written.
+Set `SKILL_IMPROVER_JEV_CORPUS` to a file path (relative to the project root, or absolute) in the environment of at least 3 real projects for at least 2 weeks. The hook appends one redacted `{"t", "g", "trigger", "window"}` line per `fail` or `prompt` event, file mode `0600`; `g` is an opaque hash of project and session, shared by every window that session captures. Unset, nothing is written.
 
 ## 2. Label
 
@@ -12,7 +12,7 @@ Set `SKILL_IMPROVER_JEV_CORPUS` to a file path (relative to the project root, or
 python3 bench/detector/label.py capture1.jsonl capture2.jsonl --labeler A
 ```
 
-Dedupes by window, assigns `id = sha1(window)[:12]`, and splits `dev`/`test` by id parity. Answer `y`/`n`/`s`/`q`; `bench/detector/corpus/corpus.jsonl` is rewritten after every answer. No detector output is ever shown. Rerun to resume.
+Dedupes by window, assigns `id = sha1(window)[:12]`, and splits `dev`/`test` by the parity of `g`, so a session's overlapping windows (successive ones share up to seven of eight events) never straddle the split. A capture line without `g` is refused. Answer `y`/`n`/`s`/`q`; `bench/detector/corpus/corpus.jsonl` is rewritten after every answer. No detector output is ever shown. Rerun to resume.
 
 Second labeler, on a sample of already-labelled windows:
 
@@ -35,7 +35,7 @@ python3 bench/detector/run.py --corpus bench/detector/corpus/corpus.jsonl \
 - Keys: `OPENROUTER_API_KEY` (jev, openrouter_llm), `ANTHROPIC_API_KEY` (claude_haiku).
 - `--second-labels` prints Cohen's kappa against the first labeler.
 
-Output: `<out>/<detector>.jsonl` (raw rows) and `<out>/summary.json` (per split: n, P/R/F1 with Wilson 95% intervals on P and R, false nudges per 100 non-lesson windows, latency p50/p95, mean bytes out, errors; exact model ids; `date -u`). A failed call counts as a miss and is reported in `errors`. For Jev, the F1-best threshold is picked on `dev` and `test` is reported at both 0.6 (shipped) and that threshold.
+Output: `<out>/<detector>.jsonl` (raw rows) and `<out>/summary.json` (per split: n, number of session groups, P/R/F1 with 95% intervals from a bootstrap that resamples whole session groups, false nudges per 100 non-lesson windows, latency p50/p95, mean bytes out, errors; exact model ids; `date -u`). A failed call counts as a miss and is reported in `errors`. For Jev, the F1-best threshold is picked on `dev` and `test` is reported at both 0.6 (shipped) and that threshold.
 
 ## Corpus targets
 

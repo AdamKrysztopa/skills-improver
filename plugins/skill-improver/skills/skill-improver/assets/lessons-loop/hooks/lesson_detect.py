@@ -8,8 +8,8 @@ drain and archive take over unchanged.
 
 Registered in .claude/settings.local.json by `seed_lessons.py --jev-provider`.
 Hook mode fails open: every error path exits 0 and prints nothing a session could trip on.
-`--status [provider] [--probe]` is the one exception: it is run by a person, reports on stderr and
-exits 1 when anything is wrong, including its own failure.
+`--status [provider] [--probe]` is the one exception: it is run by a person, reads the provider from
+the project's registration, reports on stderr and exits 1 when anything is wrong, including its own failure.
 
 Measurement is off unless SKILL_IMPROVER_JEV_EVAL names a file: then one JSON line per Jev call,
 nudge and queue write is appended there, and nothing else about the hook's behaviour changes.
@@ -18,6 +18,7 @@ nudge and queue write is appended there, and nothing else about the hook's behav
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import http.client
 import json
 import os
@@ -52,6 +53,9 @@ STATE_TTL_S = 86400
 PAUSE_S = 1800
 STATE_VERSION = 1
 EVAL_ENV = "SKILL_IMPROVER_JEV_EVAL"
+EVENTS = (("PostToolUse", "Bash|Edit|Write|MultiEdit"), ("PostToolUseFailure", None), ("UserPromptSubmit", None))
+PROJECT_SETTINGS = (".claude/settings.json", ".claude/settings.local.json")
+USER_SETTINGS = Path.home() / ".claude" / "settings.json"
 
 QUESTION = (
     "Does this event history show a mistake, wrong assumption, drifted document or missing "
@@ -277,6 +281,38 @@ def call_jev(provider: str, key: str, body: dict, *, timeout: float = TIMEOUT_S,
     return float(score)
 
 
+# --- configuration as Claude Code sees it -------------------------------------
+
+def settings_env(project_dir: Path, user_settings: Path | None = None) -> dict:
+    """The `env` blocks Claude Code exports to hooks: user, project, then personal project settings."""
+    merged: dict = {}
+    for path in (user_settings or USER_SETTINGS, *(Path(project_dir) / rel for rel in PROJECT_SETTINGS)):
+        try:
+            block = json.loads(path.read_text(encoding="utf-8")).get("env", {})
+        except (OSError, ValueError, AttributeError):
+            continue
+        if isinstance(block, dict):
+            merged.update({k: v for k, v in block.items() if isinstance(v, str)})
+    return merged
+
+
+def registered_events(project_dir: Path) -> dict:
+    """{provider: {event, ...}} for every hook in the project's settings that runs this detector."""
+    found: dict = {}
+    for rel in PROJECT_SETTINGS:
+        try:
+            hooks = json.loads((Path(project_dir) / rel).read_text(encoding="utf-8")).get("hooks", {})
+            for event, groups in hooks.items():
+                for group in groups:
+                    for hook in group.get("hooks", []):
+                        match = re.search(r"lesson_detect\.py\"?\s+(\w+)", str(hook.get("command", "")))
+                        if match and match.group(1) in PROVIDERS:
+                            found.setdefault(match.group(1), set()).add(event)
+        except (OSError, ValueError, AttributeError, TypeError):
+            continue
+    return found
+
+
 # --- per-session state --------------------------------------------------------
 
 def new_state() -> dict:
@@ -323,30 +359,57 @@ def locked(path: Path, *, timeout: float = LOCK_TIMEOUT_S):
     if fcntl is None:
         yield True
         return
+    lock = path.with_suffix(".lock")
     try:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        fd = os.open(str(path.with_suffix(".lock")), os.O_RDWR | os.O_CREAT, 0o600)
     except OSError:
         yield False
         return
-    try:
-        deadline = time.monotonic() + timeout
-        while True:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                if time.monotonic() >= deadline:
-                    yield False
-                    return
-                time.sleep(0.01)
-            except OSError:
-                yield True
-                return
+    deadline = time.monotonic() + timeout
+    while True:
         try:
+            fd = os.open(str(lock), os.O_RDWR | os.O_CREAT, 0o600)
+        except OSError:
+            yield False
+            return
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(fd)
+            if time.monotonic() >= deadline:
+                yield False
+                return
+            time.sleep(0.01)
+            continue
+        except OSError:
+            os.close(fd)
             yield True
-        finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            return
+        if _is_current(fd, lock):
+            break
+        os.close(fd)  # the sweep reaped this inode between our open and our flock
+    try:
+        yield True
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def _is_current(fd: int, lock: Path) -> bool:
+    try:
+        on_disk, held = os.stat(str(lock)), os.fstat(fd)
+    except OSError:
+        return False
+    return (on_disk.st_dev, on_disk.st_ino) == (held.st_dev, held.st_ino)
+
+
+def _reap_lock(lock: Path) -> None:
+    """Unlink a lock only while holding it; a waiter on the old inode then sees it is not current."""
+    fd = os.open(str(lock), os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if _is_current(fd, lock):
+            lock.unlink()
     finally:
         os.close(fd)
 
@@ -361,12 +424,10 @@ def _sweep(state_dir: Path, now: float) -> None:
         try:
             if now - old.stat().st_mtime <= STATE_TTL_S:
                 continue
-            if old.suffix == ".lock":
-                # flock never touches the mtime, so only reap a lock whose session state is gone or stale
-                sibling = old.with_suffix(".json")
-                if sibling.exists() and now - sibling.stat().st_mtime <= STATE_TTL_S:
-                    continue
-            old.unlink()
+            if old.suffix != ".lock":
+                old.unlink()
+            elif fcntl is not None:
+                _reap_lock(old)
         except OSError:
             pass
 
@@ -518,7 +579,8 @@ def run(event: str, payload: dict, provider: str, *, env: dict, project_dir: Pat
         try:
             fd = os.open(str(Path(project_dir) / corpus), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
             with os.fdopen(fd, "a", encoding="utf-8") as handle:
-                handle.write(json.dumps({"t": int(now), "trigger": ev["k"], "window": window}) + "\n")
+                handle.write(json.dumps({"t": int(now), "g": capture_group(project_dir, session),
+                                         "trigger": ev["k"], "window": window}) + "\n")
         except OSError:
             pass
     log = eval_logger(env, project_dir, session[:36], now)
@@ -540,14 +602,42 @@ def run(event: str, payload: dict, provider: str, *, env: dict, project_dir: Pat
     return out
 
 
+def capture_group(project_dir: Path, session: str) -> str:
+    """An opaque id shared by every window one session captures, so a benchmark can keep them together."""
+    return hashlib.sha256(f"{Path(project_dir).resolve()}\0{session}".encode("utf-8")).hexdigest()[:12]
+
+
 def status(provider: str | None, *, env: dict, project_dir: Path, state_dir: Path, now: float,
-           probe: bool, transport=call_jev) -> tuple[int, str]:
-    """(exit code, report) for this project's detector over the last STATE_TTL_S. Never prints a key."""
+           probe: bool, transport=call_jev, user_settings: Path | None = None) -> tuple[int, str]:
+    """(exit code, report) for this project's detector over the last STATE_TTL_S. Never prints a key.
+
+    Registration is checked first: a key and a reachable provider say nothing about whether the
+    hooks run. The key is looked up as the hooks see it, with the settings `env` blocks merged in.
+    """
     lines, problems = [], 0
-    provider = provider or "openrouter"
-    key = find_key(provider, env, project_dir)
+    registered = registered_events(project_dir)
+    if provider is None and len(registered) == 1:
+        provider = next(iter(registered))
+    if provider is None:
+        if registered:
+            lines.append(f"hooks: registered for {' and '.join(sorted(registered))} — name one: --status <provider>")
+        else:
+            lines.append("hooks: not registered in .claude/settings.json or settings.local.json — detection is off "
+                         "(enable it with seed_lessons.py --jev-provider openrouter|typesafe)")
+        return 1, "\n".join(lines)
+    missing = [event for event, _ in EVENTS if event not in registered.get(provider, set())]
+    if provider not in registered:
+        lines.append(f"hooks: not registered for {provider} — detection through it is off")
+        problems += 1
+    elif missing:
+        lines.append(f"hooks: {provider} is registered without {', '.join(missing)}")
+        problems += 1
+    else:
+        lines.append(f"hooks: registered for {provider}")
+    hook_env = {**settings_env(project_dir, user_settings), **{k: v for k, v in env.items() if v}}
+    key = find_key(provider, hook_env, project_dir)
     if not key:
-        lines.append(f"key: no {PROVIDERS[provider][2]} in the environment or .env")
+        lines.append(f"key: no {PROVIDERS[provider][2]} in the environment, Claude Code settings or .env")
         problems += 1
     else:
         lines.append(f"key: found for {provider}")
@@ -559,6 +649,9 @@ def status(provider: str | None, *, env: dict, project_dir: Path, state_dir: Pat
     calls = sum(s["calls"] for s in sessions)
     nudges = sum(s["nudges"] for s in sessions)
     lines.append(f"last 24h: {len(sessions)} session(s), {calls} call(s), {nudges} nudge(s)")
+    if not sessions:
+        lines.append("no detector hook has run here in the last 24h — use a new Claude Code session, then rerun")
+        problems += 1
     lasts = sorted((s["last"] for s in sessions if s.get("last")), key=lambda r: r["t"])
     if lasts:
         lines.append(f"last call: {int(now) - lasts[-1]['t']}s ago, {lasts[-1]['outcome']}")

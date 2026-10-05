@@ -99,6 +99,20 @@ def make_project(archive_text: str | None, queue_text: str | None) -> Path:
     return root
 
 
+def gate(root: Path, *homes: str) -> None:
+    """Make each home a safeguard that runs: the file exists and a Claude Code hook is registered."""
+    commands = []
+    for home in homes:
+        dest = root / home
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text("", encoding="utf-8")
+        if home.startswith(".claude/hooks/"):
+            commands.append({"type": "command", "command": f'python3 "$CLAUDE_PROJECT_DIR/{home}"'})
+    if commands:
+        settings = root / ".claude" / "settings.json"
+        settings.write_text(json.dumps({"hooks": {"PreToolUse": [{"hooks": commands}]}}), encoding="utf-8")
+
+
 def run_hook(root: Path):
     proc = subprocess.run(
         [sys.executable, str(root / HOOK_IN_PROJECT)],
@@ -168,6 +182,7 @@ root = make_project(
     "# Lessons — queue\n\n## Open\n\n### first open thing\n\n- **What happened:** x\n\n"
     "### second open thing\n\n- **What happened:** y\n",
 )
+gate(root, ".claude/hooks/check_docs.py", "tests/test_render.py")
 proc, ctx = run_hook(root)
 
 check("hook exits zero", proc.returncode == 0, proc.stderr)
@@ -205,6 +220,7 @@ ENFORCED_ARCHIVE = """# Lessons — archive
 | L1.4 | Hooks guide wording stays current. | `docs/hooks-guide.md` | aaa1111 | — |
 """
 root = make_project(ENFORCED_ARCHIVE, None)
+gate(root, ".claude/hooks/block_env.py", "tests/test_dates.py")
 _, ctx = run_hook(root)
 check("judgment rule is restated", "Explain trade-offs before recommending." in ctx, ctx)
 check("hook-enforced rule is not restated", "Never commit a .env file." not in ctx, ctx)
@@ -219,18 +235,19 @@ STAYS = [
     ("src/cities/map.py", "City keys are lowercase."),
     ("app/latest_report.py", "Reports sort newest first."),
     ("`CLAUDE.md`, `.claude/hooks/x.py`", "Two homes means a human still reads it."),
+    ("Makefile", "Make target gates the build."),
 ]
 GATES = [
     (".github/workflows/ci.yml", "CI runs the linter."),
     ("tests/helpers/dates.py", "Helpers live under tests."),
     ("scripts/parse_test.py", "Parsers have a test."),
-    ("Makefile", "Make target gates the build."),
 ]
 rows = "".join(f"| L2.{i} | {rule} | `{home}` | bbb2222 | — |\n"
                for i, (home, rule) in enumerate(STAYS + GATES, 1))
 root = make_project(
     "# Lessons — archive\n\n## Applied\n\n## 2026-05-02 — drain 2\n\n"
     "| id | rule | home | commit | edges |\n|------|------|------|--------|-------|\n" + rows, None)
+gate(root, "Makefile", *(home for home, _ in GATES))
 _, ctx = run_hook(root)
 for home, rule in STAYS:
     check(f"home {home!r} stays injected", rule in ctx, ctx)
@@ -241,9 +258,33 @@ root = make_project(
     "# Lessons — archive\n\n## Applied\n\n## 2026-05-02 — drain 2\n\n"
     "| id | rule | home | commit | edges |\n|------|------|------|--------|-------|\n"
     "| L3.1 | Only gated. | `tests/test_x.py` | ccc3333 | — |\n", None)
+gate(root, "tests/test_x.py")
 _, ctx = run_hook(root)
 check("no advisory rule: the enforced line does not say 'more'",
       "1 applied rule(s) are enforced" in ctx and "more" not in ctx.split("enforced")[0], ctx)
+
+print("\nSESSIONSTART — a safeguard that is absent or inactive does not hide its rule")
+
+UNPROVEN = [
+    (".claude/hooks/deleted.py", "A deleted hook protects nothing.", None),
+    (".claude/hooks/unregistered.py", "An unregistered hook never runs.", "file"),
+    (".git/hooks/pre-push", "A non-executable git hook never runs.", "file"),
+    (".pre-commit-config.yaml", "An uninstalled pre-commit config never runs.", "file"),
+    ("tests/test_gone.py", "A deleted test checks nothing.", None),
+]
+rows = "".join(f"| L4.{i} | {rule} | `{home}` | ddd4444 | — |\n"
+               for i, (home, rule, _) in enumerate(UNPROVEN, 1))
+root = make_project(
+    "# Lessons — archive\n\n## Applied\n\n## 2026-05-03 — drain 4\n\n"
+    "| id | rule | home | commit | edges |\n|------|------|------|--------|-------|\n" + rows, None)
+for home, _, made in UNPROVEN:
+    if made:
+        (root / home).parent.mkdir(parents=True, exist_ok=True)
+        (root / home).write_text("", encoding="utf-8")
+_, ctx = run_hook(root)
+for home, rule, _ in UNPROVEN:
+    check(f"home {home!r} is not shown to run, so its rule is restated", rule in ctx, ctx)
+check("no unproven safeguard is claimed as enforcing", "enforced by" not in ctx, ctx)
 
 print("\nHOOK — does not report the archive's own format example as data")
 

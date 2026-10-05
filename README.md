@@ -19,13 +19,14 @@ Three jobs:
    was actually running when the mistake happened. Paths adapt to the host
    project's conventions. `--seed-from-session` populates the queue from what
    went wrong in the current session.
-   - SessionStart names rules enforced by a hook, test or CI gate by id instead
-     of restating them.
+   - SessionStart names rules enforced by a registered hook, test or CI gate by
+     id instead of restating them; a missing or unregistered safeguard keeps its
+     rule in full.
    - Optionally, **Jev-assisted lesson detection** (`--jev-provider`) nudges
      Claude to capture a lesson when a compact window of recent events looks
      lesson-worthy; Jev only detects, Claude still writes the entry. Off by
      default. `python3 .claude/hooks/lesson_detect.py --status --probe` checks
-     that it is configured, running and succeeding.
+     that its hooks are registered, they have run, and the provider answers.
    - The installer refuses paths outside the project.
 
    See [`references/lessons-loop.md`](plugins/skill-improver/skills/skill-improver/references/lessons-loop.md).

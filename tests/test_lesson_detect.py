@@ -359,6 +359,9 @@ class IoTests(unittest.TestCase):
         row = json.loads(lines[0])
         self.assertEqual(row["trigger"], "fail")
         self.assertEqual(row["window"][-1]["k"], "fail")
+        self.assertRegex(row["g"], r"^[0-9a-f]{12}$")
+        self.run_hook("PostToolUseFailure", fail_payload(err="again"), t, env=env)
+        self.assertEqual(json.loads(corpus.read_text().splitlines()[1])["g"], row["g"])
         self.assertNotIn(KEY, corpus.read_text())
         self.assertEqual(corpus.stat().st_mode & 0o077, 0)
 

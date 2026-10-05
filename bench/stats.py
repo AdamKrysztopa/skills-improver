@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import random
 
 
 def prf(tp: int, fp: int, fn: int) -> tuple[float, float, float]:
@@ -17,6 +18,29 @@ def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
     centre = (phat + z * z / (2 * n)) / denom
     half = z * math.sqrt(phat * (1 - phat) / n + z * z / (4 * n * n)) / denom
     return max(0.0, centre - half), min(1.0, centre + half)
+
+
+def cluster_bootstrap(clusters: list[tuple], statistic, n: int = 2000, seed: int = 0,
+                      level: float = 0.95) -> tuple[float, float]:
+    """Percentile interval for `statistic(*summed counts)`, resampling whole clusters with replacement.
+
+    Rows that share a cluster are correlated, so they are resampled together; a statistic that is
+    undefined for a resample (returns None) drops that resample.
+    """
+    rng = random.Random(seed)
+    values = []
+    for _ in range(n if clusters else 0):
+        total = [0] * len(clusters[0])
+        for _ in clusters:
+            for i, count in enumerate(clusters[rng.randrange(len(clusters))]):
+                total[i] += count
+        value = statistic(*total)
+        if value is not None:
+            values.append(value)
+    if not values:
+        return 0.0, 1.0
+    tail = (1 - level) / 2
+    return percentile(values, tail), percentile(values, 1 - tail)
 
 
 def percentile(xs: list[float], q: float) -> float:

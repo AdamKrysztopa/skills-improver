@@ -19,6 +19,7 @@ _spec.loader.exec_module(L)
 
 W1 = [{"k": "fail", "key": "Bash:pytest", "err": "boom"}]
 W2 = [{"k": "prompt", "text": "no, again"}]
+G = "0123456789ab"
 
 
 class LabelHelperTests(unittest.TestCase):
@@ -29,25 +30,38 @@ class LabelHelperTests(unittest.TestCase):
         expected = hashlib.sha1(json.dumps(a, sort_keys=True).encode()).hexdigest()[:12]
         self.assertEqual(L.record_id(a), expected)
 
-    def test_split_follows_id_parity(self):
+    def test_split_follows_group_parity(self):
         self.assertEqual(L.split_for("000000000001"), "test")
         self.assertEqual(L.split_for("00000000000a"), "dev")
         self.assertEqual({L.split_for(L.record_id([{"n": i}])) for i in range(40)}, {"dev", "test"})
 
+    def test_overlapping_windows_from_one_session_share_a_split(self):
+        events = [{"k": "fail", "key": "Bash:pytest", "err": "boom %d" % i} for i in range(16)]
+        raw = [{"t": i, "g": "00000000000a", "trigger": "fail", "window": events[i:i + 8]} for i in range(9)]
+        raw += [{"t": i, "g": "000000000001", "trigger": "fail", "window": events[i + 1:i + 9]} for i in range(3)]
+        out = L.merge_captures(raw, [])
+        self.assertEqual(len(out), 9)
+        self.assertEqual({r["split"] for r in out}, {"dev"})
+        self.assertEqual({r["group"] for r in out}, {"00000000000a"})
+
+    def test_a_capture_without_a_session_group_is_refused(self):
+        with self.assertRaises(ValueError):
+            L.merge_captures([{"t": 1, "trigger": "fail", "window": W1}], [])
+
     def test_merge_dedupes_identical_windows_and_ignores_capture_time(self):
-        raw = [{"t": 1, "trigger": "fail", "window": W1}, {"t": 2, "trigger": "fail", "window": W1},
-               {"t": 3, "trigger": "prompt", "window": W2}]
+        raw = [{"t": 1, "g": G, "trigger": "fail", "window": W1}, {"t": 2, "g": G, "trigger": "fail", "window": W1},
+               {"t": 3, "g": G, "trigger": "prompt", "window": W2}]
         out = L.merge_captures(raw, [])
         self.assertEqual(len(out), 2)
-        self.assertEqual(set(out[0]), {"id", "trigger", "window", "label", "labeler", "split"})
+        self.assertEqual(set(out[0]), {"id", "group", "trigger", "window", "label", "labeler", "split"})
         self.assertEqual((out[0]["label"], out[0]["labeler"]), (None, None))
         self.assertEqual(out[0]["id"], L.record_id(W1))
 
     def test_merge_keeps_existing_labels_and_adds_only_new_windows(self):
-        existing = L.merge_captures([{"t": 1, "trigger": "fail", "window": W1}], [])
+        existing = L.merge_captures([{"t": 1, "g": G, "trigger": "fail", "window": W1}], [])
         existing[0]["label"], existing[0]["labeler"] = True, "A"
-        out = L.merge_captures([{"t": 2, "trigger": "fail", "window": W1},
-                                {"t": 3, "trigger": "prompt", "window": W2}], existing)
+        out = L.merge_captures([{"t": 2, "g": G, "trigger": "fail", "window": W1},
+                                {"t": 3, "g": G, "trigger": "prompt", "window": W2}], existing)
         self.assertEqual([r["label"] for r in out], [True, None])
         self.assertEqual(out[0]["labeler"], "A")
 

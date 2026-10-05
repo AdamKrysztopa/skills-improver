@@ -511,6 +511,14 @@ def run(event: str, payload: dict, provider: str, *, env: dict, project_dir: Pat
         if not _save(path, state):
             return None
         window = list(state["window"])
+    corpus = env.get("SKILL_IMPROVER_JEV_CORPUS")
+    if corpus and ev["k"] in ("fail", "prompt"):
+        try:
+            fd = os.open(str(Path(project_dir) / corpus), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            with os.fdopen(fd, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"t": int(now), "trigger": ev["k"], "window": window}) + "\n")
+        except OSError:
+            pass
     log = eval_logger(env, project_dir, session[:36], now)
     if ev["k"] == "edit" and os.path.basename(ev["key"]) == "lessons.md":
         log({"e": "queue_write", "titles": queue_titles(payload["tool_input"])})

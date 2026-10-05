@@ -510,7 +510,7 @@ def report_jev_state(lay: Layout) -> None:
     label = "JEV-ASSISTED LESSON DETECTION"
     if state == "enabled":
         print(f"\n{label}: enabled ({provider}) — unchanged by this run.")
-        print(f"  Health: python3 {lay.detector} --status --probe")
+        print(f"  Health (run from the project root): python3 {lay.detector} --status --probe")
         return
     lead = ("installed but not registered (off)" if state == "off"
             else "not enabled — projects seeded before v1.3 have no Jev registration; that is their normal state")
@@ -596,11 +596,11 @@ def jev_report(lay: Layout, provider: str, *, dry_run: bool) -> None:
          "detection stays inactive until it is found"),
         ("Connectivity", status),
         ("Registration", f"{LOCAL_SETTINGS} (personal, git-ignored by Claude Code)"),
+        ("Health", f"python3 {lay.detector} --status --probe (run from the project root)"),
     ]
     print("\nJEV-ASSISTED LESSON DETECTION (optional — Jev scores a compact window; Claude writes the lesson)")
     for label, value in rows:
         print(f"  {label:<13}: {value}")
-    print(f"  Health: python3 {lay.detector} --status --probe")
     if key and source == ".env" and dotenv_unignored(lay.root):
         print("  !! .env holds the key and is not git-ignored — add it to .gitignore.")
     print("Base lessons loop installed successfully — nothing above affects it.")

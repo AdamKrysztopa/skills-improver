@@ -94,6 +94,7 @@ class SeedJevTests(unittest.TestCase):
         for f in ("Provider", "Credential", "Connectivity", "Base lessons loop"):
             self.assertIn(f, out)
         self.assertIn("Connectivity : OK", out)
+        self.assertIn("--status --probe", out)
 
     def test_seed_from_session_and_typesafe(self):
         rc, out = self.seed("--seed-from-session", "--jev-provider", "typesafe", env={"TYPESAFE_API_KEY": KEY})

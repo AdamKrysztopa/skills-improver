@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 HOOK = (Path(__file__).resolve().parent.parent / "plugins" / "skill-improver" / "skills"
         / "skill-improver" / "assets" / "lessons-loop" / "hooks" / "lesson_detect.py")
@@ -63,6 +67,43 @@ class Status(unittest.TestCase):
                             state_dir=self.state, now=NOW, probe=True, transport=boom)
         self.assertEqual(rc, 1)
         self.assertIn("probe: auth", text)
+
+
+class StatusCli(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name).resolve()
+        self.state = self.root / "state"
+        self.state.mkdir()
+
+    def run_main(self, *args):
+        err, out = io.StringIO(), io.StringIO()
+        env = {"CLAUDE_PROJECT_DIR": str(self.root), "OPENROUTER_API_KEY": KEY}
+        with mock.patch.object(D.sys, "argv", ["lesson_detect.py", *args]), \
+                mock.patch.dict(os.environ, env), \
+                mock.patch.object(D, "default_state_dir", return_value=self.state), \
+                contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
+            rc = D.main()
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_a_malformed_state_file_fails_loudly_not_open(self):
+        (self.state / "a.json").write_text(json.dumps({**D.new_state(), "project": str(self.root), "calls": "x"}))
+        rc, out, err = self.run_main("--status")
+        self.assertEqual(rc, 1)
+        self.assertIn("status: internal error (TypeError)", err)
+        self.assertNotIn(KEY, out + err)
+
+    def test_an_unknown_argument_is_rejected(self):
+        rc, out, err = self.run_main("--status", "--probee")
+        self.assertEqual(rc, 1)
+        self.assertIn("status: unknown argument --probee", err)
+        self.assertEqual(out, "")
+
+    def test_a_clean_run_prints_the_report(self):
+        rc, out, _ = self.run_main("--status", "openrouter")
+        self.assertEqual(rc, 0)
+        self.assertIn("key: found for openrouter", out)
 
 
 if __name__ == "__main__":

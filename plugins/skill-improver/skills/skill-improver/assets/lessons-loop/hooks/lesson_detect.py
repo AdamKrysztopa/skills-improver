@@ -7,7 +7,9 @@ tells Claude to run the `lessons` skill; Claude writes the entry, and the queue,
 drain and archive take over unchanged.
 
 Registered in .claude/settings.local.json by `seed_lessons.py --jev-provider`.
-Fails open: every error path exits 0 and prints nothing a session could trip on.
+Hook mode fails open: every error path exits 0 and prints nothing a session could trip on.
+`--status [provider] [--probe]` is the one exception: it is run by a person, reports on stderr and
+exits 1 when anything is wrong, including its own failure.
 
 Measurement is off unless SKILL_IMPROVER_JEV_EVAL names a file: then one JSON line per Jev call,
 nudge and queue write is appended there, and nothing else about the hook's behaviour changes.
@@ -576,16 +578,31 @@ def status(provider: str | None, *, env: dict, project_dir: Path, state_dir: Pat
     return (1 if problems else 0), "\n".join(lines)
 
 
-def main() -> int:
-    """Entry point: `lesson_detect.py <provider>` with the hook payload on stdin. Always exits 0."""
+def _status_cli(args: list[str]) -> int:
+    unknown = next((a for a in args if a != "--probe" and a not in PROVIDERS), None)
+    if unknown is not None:
+        print(f"status: unknown argument {unknown}", file=sys.stderr)
+        return 1
     try:
-        if len(sys.argv) > 1 and sys.argv[1] == "--status":
-            provider = next((a for a in sys.argv[2:] if a in PROVIDERS), None)
-            project = Path(os.environ.get("CLAUDE_PROJECT_DIR") or ".").resolve()
-            rc, text = status(provider, env=dict(os.environ), project_dir=project,
-                              state_dir=default_state_dir(), now=time.time(), probe="--probe" in sys.argv)
-            print(text)
-            return rc
+        provider = next((a for a in args if a in PROVIDERS), None)
+        project = Path(os.environ.get("CLAUDE_PROJECT_DIR") or ".").resolve()
+        rc, text = status(provider, env=dict(os.environ), project_dir=project,
+                          state_dir=default_state_dir(), now=time.time(), probe="--probe" in args)
+    except Exception as exc:  # type name only: str(exc) could carry a key
+        print(f"status: internal error ({type(exc).__name__})", file=sys.stderr)
+        return 1
+    print(text)
+    return rc
+
+
+def main() -> int:
+    """Entry point: `lesson_detect.py <provider>` with the hook payload on stdin. Always exits 0.
+
+    `--status` is the exception and never fails open: see `_status_cli`.
+    """
+    if len(sys.argv) > 1 and sys.argv[1] == "--status":
+        return _status_cli(sys.argv[2:])
+    try:
         provider = sys.argv[1] if len(sys.argv) > 1 else ""
         if provider not in PROVIDERS:
             return 0

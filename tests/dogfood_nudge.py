@@ -8,6 +8,11 @@ queue entry was written.
 
     python3 tests/dogfood_nudge.py --wording current --runs 3
     python3 tests/dogfood_nudge.py --wording baseline --runs 3      # the v1.3.0 wording
+    python3 tests/dogfood_nudge.py --wording current --model claude-sonnet-5-5 --out bench/dogfood/run.jsonl
+
+`--model` defaults to a full model id so a rerun measures the same model. `--out` (default
+`bench/dogfood/<date>-<wording>.jsonl`) gets one JSON line per run, appended as the run finishes.
+Each scenario's summary prints k/n with its Wilson 95% interval.
 
 Scenarios: `recurring` says in the prompt that the mistake is a repeat (so it is confounded: the skill's
 own description fires), `subtle` carries no such cue and isolates the nudge, `routine` is a typo that
@@ -17,6 +22,7 @@ should not be captured. `--wording none` is the no-nudge control.
 from __future__ import annotations
 
 import argparse
+import datetime
 import importlib.util
 import json
 import os
@@ -25,7 +31,8 @@ import sys
 import tempfile
 from pathlib import Path
 
-SKILL = Path(__file__).resolve().parent.parent / "plugins/skill-improver/skills/skill-improver"
+ROOT = Path(__file__).resolve().parent.parent
+SKILL = ROOT / "plugins/skill-improver/skills/skill-improver"
 
 BASELINE = (
     "Possible lesson: after your last prompt, Jev scored the last {n} events as lesson-worthy "
@@ -51,6 +58,24 @@ def load(name: str, path: Path):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+wilson = load("bench_stats", ROOT / "bench/stats.py").wilson
+
+CONFOUNDED = {"recurring": "(confounded: prompt states it is a repeat)"}
+
+
+def summary_line(wording: str, scenario: str, results: list) -> str:
+    n = len(results)
+
+    def part(key: str) -> str:
+        k = sum(r[key] for r in results)
+        lo, hi = wilson(k, n)
+        return f"{k}/{n} [{lo:.2f}, {hi:.2f}]"
+
+    line = (f"{wording:9} {scenario:10} invoked `lessons`: {part('invoked_skill')}"
+            f"   queue entry written: {part('queue_entry_written')}")
+    return f"{line}  {CONFOUNDED[scenario]}" if scenario in CONFOUNDED else line
 
 
 def nudge(wording: str) -> str:
@@ -109,15 +134,25 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--wording", choices=("current", "baseline", "none"), default="current")
     p.add_argument("--runs", type=int, default=3)
-    p.add_argument("--model", default="sonnet")
+    p.add_argument("--model", default="claude-sonnet-5-5")
+    p.add_argument("--out", type=Path, help="JSONL of per-run results (default bench/dogfood/<date>-<wording>.jsonl)")
     p.add_argument("--budget", default="0.50", help="USD cap per run")
     p.add_argument("--scenario", choices=(*SCENARIOS, "all"), default="all")
     args = p.parse_args()
     names = list(SCENARIOS) if args.scenario == "all" else [args.scenario]
+    out = args.out or ROOT / f"bench/dogfood/{datetime.date.today().isoformat()}-{args.wording}.jsonl"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    version = subprocess.run(["claude", "--version"], capture_output=True, text=True, check=True).stdout.strip()
     for name in names:
-        results = [run_once(args.wording, name, args.model, args.budget) for _ in range(args.runs)]
-        print(f"{args.wording:9} {name:10} invoked `lessons`: {sum(r['invoked_skill'] for r in results)}/{args.runs}"
-              f"   queue entry written: {sum(r['queue_entry_written'] for r in results)}/{args.runs}")
+        results = []
+        for run in range(args.runs):
+            result = run_once(args.wording, name, args.model, args.budget)
+            results.append(result)
+            record = {"scenario": name, "wording": args.wording, "model": args.model, "run": run, **result,
+                      "claude_version": version}
+            with out.open("a") as fh:
+                fh.write(json.dumps(record) + "\n")
+        print(summary_line(args.wording, name, results))
     return 0
 
 

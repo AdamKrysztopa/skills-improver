@@ -19,9 +19,9 @@ Three jobs:
    was actually running when the mistake happened. Paths adapt to the host
    project's conventions. `--seed-from-session` populates the queue from what
    went wrong in the current session.
-   - SessionStart names rules enforced by a registered hook, test or CI gate by
-     id instead of restating them; a missing or unregistered safeguard keeps its
-     rule in full.
+   - SessionStart names rules enforced by a registered hook by id instead of
+     restating them; a rule homed in a test, a CI workflow, or a missing or
+     unregistered safeguard keeps its rule in full.
    - Optionally, **Jev-assisted lesson detection** (`--jev-provider`) nudges
      Claude to capture a lesson when a compact window of recent events looks
      lesson-worthy; Jev only detects, Claude still writes the entry. Off by

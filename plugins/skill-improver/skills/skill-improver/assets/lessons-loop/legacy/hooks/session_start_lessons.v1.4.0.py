@@ -51,10 +51,9 @@ def enforced(home: str, root: Path) -> bool:
     """True only for a single safeguard that exists and is known to run without anyone remembering.
 
     A gate-shaped path is not evidence: a Claude Code hook must be registered in settings, a git
-    hook executable, a pre-commit config installed. A test may never be run and a CI workflow may
-    filter out the change, and a Makefile, justfile, nox or tox file runs only when someone invokes
-    it, so their rules are restated. A rule wrongly hidden is lost; a rule wrongly injected only
-    costs a line.
+    hook executable, a pre-commit config installed. A Makefile, justfile, nox or tox file runs only
+    when someone invokes it, so its rule is restated. A rule wrongly hidden is lost; a rule wrongly
+    injected only costs a line.
     """
     raw = home.strip().strip("`").strip()
     h = raw.lower()
@@ -63,13 +62,18 @@ def enforced(home: str, root: Path) -> bool:
     path = root / raw
     if not path.is_file():
         return False
+    parts = h.split("/")
+    name = parts[-1]
     if h.startswith(".claude/hooks/"):
         return any(raw in command for command in _hook_commands(root))
     if h.startswith(".git/hooks/"):
         return os.access(path, os.X_OK)
-    if h == ".pre-commit-config.yaml":
-        return os.access(root / ".git" / "hooks" / "pre-commit", os.X_OK)
-    return False
+    if h.startswith(".github/workflows/"):
+        return True
+    if name == ".pre-commit-config.yaml":
+        return (root / ".git" / "hooks" / "pre-commit").is_file()
+    return (name == "conftest.py" or name.startswith("test_") or name.endswith("_test.py")
+            or "tests" in parts or "test" in parts)
 
 
 def project_root() -> Path:
@@ -120,8 +124,9 @@ def build_context() -> str:
         out.append("")
     if mechanical:
         out.append(
-            f"{len(mechanical)}{' more' if advisory else ''} applied rule(s) are enforced by a "
-            f"registered hook, so they are not restated here:{', '.join(e.id for e in mechanical)}. If one of those checks fires, "
+            f"{len(mechanical)}{' more' if advisory else ''} applied rule(s) are enforced by a hook, test "
+            f"or CI gate, so they are not "
+            f"restated here: {', '.join(e.id for e in mechanical)}. If one of those checks fires, "
             f"its row in `{ARCHIVE_REL}` says why it exists."
         )
         out.append("")

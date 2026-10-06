@@ -227,28 +227,32 @@ def find_archives(root: Path) -> list[str]:
 
 
 def locate_ledger(lay: Layout) -> None:
-    """Point `lay` at an existing loop's ledger when it is not where a fresh install would put it.
+    """Point `lay` at an existing loop's ledger, found by its archive.
+
+    A queue alone does not locate the ledger: a stale one left in the default docs directory would
+    otherwise put a new, empty archive beside it while the real one lives elsewhere.
 
     Raises:
         LayoutError: A loop is installed but its ledger is not in exactly one place; creating an
             empty one beside it would split the record.
     """
     root = lay.root
-    if on_disk_name(root / lay.docs, ARCHIVE_NAME) or on_disk_name(root / lay.docs, QUEUE_NAME):
-        return
     present = [f["dest"] for f in planned_files(lay, False, with_jev=True)
                if f["kind"] == "code" and (root / f["dest"]).exists()]
     if not present:
         return
     found = find_archives(root)
     if len(found) == 1:
-        lay.docs, lay.located = found[0], True
+        lay.located = found[0] != lay.docs
+        lay.docs = found[0]
+        return
+    if not found and on_disk_name(root / lay.docs, QUEUE_NAME):
         return
     where = (f"{len(found)} archives were found ({', '.join(d + '/' for d in found)})" if found
              else f"no {ARCHIVE_NAME} was found at the root or under {', '.join(d + '/' for d in DOC_DIR_CANDIDATES)}")
     raise LayoutError(
-        f"an existing lessons loop is installed here ({present[0]}), but its ledger is not in "
-        f"{lay.docs}/ and {where}. Nothing was written, and a second ledger is never created. "
+        f"an existing lessons loop is installed here ({present[0]}), but its ledger cannot be "
+        f"located: {where}. Nothing was written, and a second ledger is never created. "
         f"Pass --docs-dir with the directory that holds {QUEUE_NAME} and the archive.")
 
 
@@ -304,7 +308,6 @@ def planned_files(lay: Layout, empty_queue: bool, *, with_jev: bool = False) -> 
          "legacy": ["legacy/tests/test_lessons_loop.v1.3.1.py",
                     "legacy/tests/test_lessons_loop.v1.4.0.py",
                     "legacy/tests/test_lessons_loop.v1.4.1.py"],
-         "couples": lay.hook,
          "constants": {"ROOT_UP": tests_root_up, "CHECKER_REL": lay.checker,
                        "HOOK_REL": lay.hook, "SKILLS_REL": lay.skills,
                        "TEMPLATE_ARCHIVE_REL": f"{lay.tests}/template-archive.md",
@@ -442,7 +445,12 @@ def check_hooks_shape(settings: object) -> None:
 
 
 def project_lessons_hook(lay: Layout) -> str | None:
-    """A SessionStart script of the project's own that already reads this ledger, if one is registered."""
+    """A registered SessionStart script of the project's own that is shown to inject this ledger.
+
+    Mentioning a ledger file is not enough: a comment, a queue counter or an archive validator
+    names it too. The script is run as Claude Code runs it at session start, and counts only if
+    what it injects names the archive or cites a rule the archive holds.
+    """
     names = (posixpath.basename(lay.archive).lower(), posixpath.basename(lay.queue).lower())
     for rel in (".claude/settings.json", LOCAL_SETTINGS):
         try:
@@ -461,9 +469,33 @@ def project_lessons_hook(lay: Layout) -> str | None:
                         body = (lay.root / script).read_text(encoding="utf-8", errors="replace").lower()
                     except OSError:
                         continue
-                    if any(name in body for name in names):
+                    if any(name in body for name in names) and injects_archive(lay, script):
                         return script
     return None
+
+
+def injects_archive(lay: Layout, script: str) -> bool:
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(lay.root / script)], cwd=str(lay.root), capture_output=True, text=True,
+            input=json.dumps({"hook_event_name": "SessionStart", "source": "startup"}), timeout=10,
+            env={**os.environ, "CLAUDE_PROJECT_DIR": str(lay.root), "PYTHONDONTWRITEBYTECODE": "1"})
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if proc.returncode != 0:
+        return False
+    try:
+        context = str(json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"])
+    except (ValueError, KeyError, TypeError):
+        context = proc.stdout
+    if lay.archive.lower() in context.lower():
+        return True
+    try:
+        archive = (lay.root / lay.archive).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    held = set(re.findall(r"^\|\s*(L\d+\.\d+)\s*\|", archive, re.M))
+    return bool(held & set(re.findall(r"\bL\d+\.\d+\b", context)))
 
 
 def settings_action(lay: Layout, superseded_by: str | None = None) -> tuple[str, dict]:
@@ -848,8 +880,8 @@ def plan_states(lay: Layout, files: list[dict], superseded_by: str | None) -> di
 def hold_coupled(files: list[dict], states: dict[str, str]) -> dict[str, str]:
     """Mark an outdated file `held` when the file it is tested against carries the project's edits.
 
-    The hook and its test assert each other's behaviour, so refreshing one beside a customised
-    other makes the upgrade's own verification fail.
+    Only the hook is held, behind an edited suite that asserts its behaviour. The suite is never
+    held behind an edited hook: it is told the hook is the project's own and skips its checks.
     """
     held = dict(states)
     for f in files:

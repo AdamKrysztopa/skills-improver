@@ -7,7 +7,8 @@ defect on purpose, and shown staying quiet against one that does not.
 
     python3 tests/test_lessons_loop.py
 
-No dependencies. Exits non-zero if any check fails.
+No dependencies. Exits non-zero if any check fails. Importing it runs nothing, so a
+project's pytest can collect it: `test_lessons_loop` runs the same checks.
 
 A part listed in PROJECT_OWNED is the project's own version, not the one this
 suite was written against, so its checks are skipped and the skip is printed.
@@ -385,21 +386,36 @@ def drain_skill_checks() -> None:
 
 
 # --------------------------------------------------------------------------
-if not owned_by_project("checker", f"CHECKER ({CHECKER_REL})"):
-    checker_checks()
-# The hook parses the archive through the checker, so its checks run against whichever checker is
-# installed: a project checker the shipped hook cannot read is a broken hook, not a skipped one.
-if not owned_by_project("hook", "HOOK / SESSIONSTART"):
-    hook_checks()
-if not owned_by_project("lessons", "SKILLS — lessons"):
-    lessons_skill_checks()
-if not owned_by_project("implement-ll", "SKILLS — implement-ll"):
-    drain_skill_checks()
+def run() -> int:
+    """Run every check that applies here; 0 when none failed."""
+    global passed
+    passed = 0
+    failures.clear()
+    skipped.clear()
+    if not owned_by_project("checker", f"CHECKER ({CHECKER_REL})"):
+        checker_checks()
+    # The hook parses the archive through the checker, so its checks run against whichever checker is
+    # installed: a project checker the shipped hook cannot read is a broken hook, not a skipped one.
+    if not owned_by_project("hook", "HOOK / SESSIONSTART"):
+        hook_checks()
+    if not owned_by_project("lessons", "SKILLS — lessons"):
+        lessons_skill_checks()
+    if not owned_by_project("implement-ll", "SKILLS — implement-ll"):
+        drain_skill_checks()
 
-print(f"\n{passed} passed, {len(failures)} failed"
-      + (f", skipped as this project's own: {', '.join(skipped)}" if skipped else ""))
-if failures:
-    print("\nFAILURES:")
-    for f in failures:
-        print(f"  - {f}")
-sys.exit(1 if failures else 0)
+    print(f"\n{passed} passed, {len(failures)} failed"
+          + (f", skipped as this project's own: {', '.join(skipped)}" if skipped else ""))
+    if failures:
+        print("\nFAILURES:")
+        for f in failures:
+            print(f"  - {f}")
+    return 1 if failures else 0
+
+
+def test_lessons_loop() -> None:
+    """The entry point for a project whose pytest collects this file."""
+    assert run() == 0, "\n".join(failures)
+
+
+if __name__ == "__main__":
+    sys.exit(run())

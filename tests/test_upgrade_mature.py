@@ -14,6 +14,8 @@ Each class reproduces a defect found upgrading a real project from v1.4.1:
 from __future__ import annotations
 
 import argparse
+import contextlib
+import importlib.util
 import io
 import json
 import os
@@ -57,6 +59,13 @@ def reformatted(source: str) -> str:
     out = tokenize.untokenize((t.type, t.string) for t in tokenize.generate_tokens(io.StringIO(source).readline))
     assert out != source
     return out
+
+
+OWN_HOOK = ".claude/hooks/lessons_context.py"
+INJECTING_HOOK = """import json
+print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext":
+    "Drained lessons live in `docs/internal/lessons-archive.md`; grep it for an L id."}}))
+"""
 
 
 def session_start_commands(root: Path) -> list[str]:
@@ -117,7 +126,8 @@ class EditedCheckerWithoutLayoutConstants(MigrationBase):
     def test_a_failing_suite_check_is_named_in_the_rollback(self):
         suite = self.root / SUITE
         text = suite.read_text()
-        suite.write_text(text.replace('print(f"\\n{passed} passed', 'check("planted failure", False)\nprint(f"\\n{passed} passed', 1))
+        suite.write_text(text.replace('    print(f"\\n{passed} passed',
+                                    '    check("planted failure", False)\n    print(f"\\n{passed} passed', 1))
         before = snapshot(self.root)
         rc, out = self.run_installer("--upgrade")
         self.assertEqual(rc, 1, out)
@@ -147,6 +157,25 @@ class UpgradeFromV141WithAnEditedChecker(MigrationBase):
         self.assert_ledger_intact()
 
 
+class UpgradeFromV141WithAnEditedHook(MigrationBase):
+    """An edited hook with its own context must not hold back the suite that knows to skip it."""
+    installer = HERE / "fixtures" / "v1_4_1" / "scripts" / "seed_lessons.py"
+
+    def test_the_suite_is_refreshed_and_skips_the_projects_hook(self):
+        self.make_old_project("--seed")
+        hook = self.root / HOOK
+        hook.write_text(hook.read_text().replace(
+            "context = build_context()", 'context = "Read docs/LESSONS-ARCHIVE.md before committing."', 1))
+        edited = hook.read_bytes()
+        rc, out = self.run_installer("--upgrade")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(hook.read_bytes(), edited)
+        self.assertIn('PROJECT_OWNED = "hook"', (self.root / SUITE).read_text())
+        self.assertIn("skipped as this project's own: hook", out)
+        self.assertNotIn("held at its previous version", out)
+        self.assert_ledger_intact()
+
+
 class ExistingLoopWithItsOwnHookAndLedger(MigrationBase):
     """Defects 2, 3 and 4: a loop that predates the generated hook, laid out its own way."""
 
@@ -162,11 +191,9 @@ class ExistingLoopWithItsOwnHookAndLedger(MigrationBase):
             self.ARCHIVE: mature_archive(3),
             CHECKER: drain_edited(S.render(self.layout(), {"src": "scripts/lessons_graph.py"}),
                                   self.ARCHIVE, self.QUEUE),
-            ".claude/hooks/lessons_context.py": (
-                "import pathlib\nDOCS = pathlib.Path(__file__).parents[2] / 'docs' / 'internal'\n"
-                "ARCHIVE = DOCS / 'lessons-archive.md'\nprint('')\n"),
+            OWN_HOOK: INJECTING_HOOK,
             ".claude/settings.json": json.dumps({"hooks": {"SessionStart": [{"hooks": [
-                {"type": "command", "command": 'python3 "$CLAUDE_PROJECT_DIR/.claude/hooks/lessons_context.py"'}]}]}}),
+                {"type": "command", "command": f'python3 "$CLAUDE_PROJECT_DIR/{OWN_HOOK}"'}]}]}}),
         }
         for skill in ("lessons", "implement-ll"):
             files[f".claude/skills/{skill}/SKILL.md"] = (ASSETS / f"skills/{skill}/SKILL.md").read_text() + "\nOurs.\n"
@@ -182,8 +209,7 @@ class ExistingLoopWithItsOwnHookAndLedger(MigrationBase):
         self.assertEqual(sorted(os.listdir(self.root / "docs")), ["README.md", "internal"])
         self.assertEqual(self.archives_in("docs/internal"), ["lessons-archive.md"])
         self.assertFalse((self.root / HOOK).exists())
-        self.assertEqual(session_start_commands(self.root),
-                         ['python3 "$CLAUDE_PROJECT_DIR/.claude/hooks/lessons_context.py"'])
+        self.assertEqual(session_start_commands(self.root), [f'python3 "$CLAUDE_PROJECT_DIR/{OWN_HOOK}"'])
         self.assert_ledger_intact()
 
     def test_upgrade_finds_the_ledger_and_adds_no_second_ledger_or_hook(self):
@@ -242,6 +268,42 @@ class ExistingLoopWithItsOwnHookAndLedger(MigrationBase):
         self.assert_no_second_ledger_or_hook()
 
 
+    def test_a_stale_default_queue_does_not_hide_the_nested_archive(self):
+        (self.root / "docs/lessons.md").write_text("# Lessons — queue\n\n## Open\n")
+        rc, out = self.run_installer("--upgrade")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("(ledger found in docs/internal/)", out)
+        self.assertEqual(sorted(os.listdir(self.root / "docs")), ["README.md", "internal", "lessons.md"])
+        self.assertEqual(self.archives_in("docs/internal"), ["lessons-archive.md"])
+        self.assert_ledger_intact()
+
+    def assert_generated_hook_installed(self):
+        rc, out = self.run_installer("--upgrade")
+        self.assertEqual(rc, 0, out)
+        self.assertTrue((self.root / HOOK).is_file())
+        self.assertEqual(len(session_start_commands(self.root)), 2)
+        self.assertNotIn("already injects the ledger", out)
+        self.assertEqual(self.archives_in("docs/internal"), ["lessons-archive.md"])
+        self.assert_ledger_intact()
+
+    def test_a_ledger_name_in_a_comment_does_not_supersede_the_generated_hook(self):
+        (self.root / OWN_HOOK).write_text("# TODO: integrate lessons-archive.md into context\nprint('')\n")
+        self.assert_generated_hook_installed()
+
+    def test_a_hook_that_only_counts_the_queue_does_not_supersede_the_generated_hook(self):
+        (self.root / OWN_HOOK).write_text(
+            "import pathlib\nq = pathlib.Path('docs/internal/lessons.md').read_text()\n"
+            "print(f\"{q.count('### ')} lesson(s) queued in docs/internal/lessons.md\")\n")
+        self.assert_generated_hook_installed()
+
+    def test_a_hook_that_cites_archived_rules_supersedes_the_generated_hook(self):
+        (self.root / OWN_HOOK).write_text(
+            "# reads lessons-archive.md\nprint('Rules: L1.1, L1.2 — follow them.')\n")
+        rc, out = self.run_installer("--upgrade")
+        self.assertEqual(rc, 0, out)
+        self.assert_no_second_ledger_or_hook()
+
+
 class SecondLessonsHookBesideTheGeneratedOne(MigrationBase):
     """Defect 3 when the generated hook is already registered: warn, change nothing."""
 
@@ -257,6 +319,22 @@ class SecondLessonsHookBesideTheGeneratedOne(MigrationBase):
         self.assertEqual(rc, 0, out)
         self.assertIn(".claude/hooks/my_lessons.py also injects the ledger at SessionStart", out)
         self.assertEqual(len(session_start_commands(self.root)), 2)
+
+
+class InstalledSuiteIsCollectable(MigrationBase):
+    """A project whose pytest collects tests/ imports the suite; importing must run nothing."""
+
+    def test_importing_the_installed_suite_runs_nothing_and_its_test_passes(self):
+        self.seed_fresh(self.root)
+        spec = importlib.util.spec_from_file_location("installed_suite", self.root / SUITE)
+        module = importlib.util.module_from_spec(spec)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            spec.loader.exec_module(module)
+        self.assertEqual(out.getvalue(), "")
+        with contextlib.redirect_stdout(out):
+            module.test_lessons_loop()
+        self.assertIn("0 failed", out.getvalue())
 
 
 class FormatterOnlyDifferences(MigrationBase):

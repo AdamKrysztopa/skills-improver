@@ -63,16 +63,17 @@ class UpgradeFromV140(MigrationBase):
         self.assertEqual(rc, 0, out)
         self.assert_ledger_intact()
 
-    def test_an_edited_v140_hook_is_kept_and_holds_its_test(self):
+    def test_an_edited_v140_hook_is_kept_and_the_suite_skips_its_checks(self):
         self.make_old_project("--seed")
         hook, loop_test = self.root / HOOK, self.root / LOOP_TEST
         hook.write_text(hook.read_text() + "\n# MY LOCAL RULE\n")
-        edited, held = hook.read_bytes(), loop_test.read_bytes()
+        edited = hook.read_bytes()
         rc, out = self.run_installer("--upgrade")
         self.assertEqual(rc, 0, out)
         self.assertIn("KEPT AS YOU LEFT THEM", out)
+        self.assertIn("skipped as this project's own: hook", out)
         self.assertEqual(hook.read_bytes(), edited)
-        self.assertEqual(loop_test.read_bytes(), held)
+        self.assertIn('PROJECT_OWNED = "hook"', loop_test.read_text())
         self.assert_ledger_intact()
 
     def test_upgraded_machinery_is_identical_to_a_fresh_install(self):

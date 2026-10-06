@@ -75,10 +75,28 @@ stored) and what Jev is doing. Then `--upgrade [--jev-provider ...]`.
 - **Layout is read back from the installed hook**, not re-guessed from the directories the project
   has grown since; an install whose hook points somewhere the installer cannot reproduce stops with
   `--docs-dir` guidance and writes nothing.
+- **A loop without the generated hook keeps its own ledger.** The installer locates it by its
+  archive: the one `lessons-archive.md` (any case) at the root or under `docs/`, `doc/` or
+  `documentation/`. A queue alone does not count, so a stale `docs/lessons.md` cannot pull a new
+  archive beside it. No archive (and no queue in the default docs directory), or more than one,
+  stops with exit 1 and `--docs-dir` guidance: a second, empty ledger is never created. The
+  ledger's file names are kept as the filesystem spells them.
+- **A project SessionStart hook that injects the ledger is kept, not doubled.** The installer runs
+  each registered SessionStart script that mentions the ledger, and it counts only if what it
+  injects names the archive's path or cites a rule the archive holds — a comment, a queue counter
+  or an archive validator does not. The generated hook is then neither installed nor registered.
 - **Refreshed:** only files that differ. A second run writes nothing. A `.bak` is never overwritten —
-  a later upgrade adds `.bak.1`, so a hand-edited hook stays recoverable.
+  a later upgrade adds `.bak.1`, so a hand-edited hook stays recoverable. A Python file that differs
+  from a shipped version only in formatting (same syntax tree and comments) counts as that version,
+  so a project formatter does not freeze it.
+- **The suite tests only what the plugin installed.** The checker, the hook or a skill kept as the
+  project's own is listed in the suite's `PROJECT_OWNED`, and its checks are skipped and say so, so an
+  edited hook no longer holds the suite at an older version. With both the checker and the hook the
+  project's own, the suite is not installed. Importing the suite runs nothing; a project's pytest
+  collects it as `test_lessons_loop`.
 - **All or nothing:** files are written through a journal; a write error, or a failure of the
-  upgraded machinery's own checks, restores every file and prints `rolled back`.
+  upgraded machinery's own checks, restores every file and prints `rolled back` with the cause.
+  Findings the checker reports in the project's real archive are shown (capped) and never fail it.
 - **Jev is a separate, explicit answer.** No flag leaves it exactly as found (`enabled (provider)`,
   `installed but not registered`, or `not enabled`); only `--jev-provider` changes it, and it never
   switches provider on its own. "Never chosen" and "chosen Off" leave identical artefacts and are

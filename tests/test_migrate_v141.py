@@ -1,7 +1,7 @@
-"""Migration tests: a project seeded by the real v1.4.0 installer, upgraded by the current one.
+"""Migration tests: a project seeded by the real v1.4.1 installer, upgraded by the current one.
 
-The v1.4.0 project is produced by running the v1.4.0 installer itself (tests/fixtures/v1_4_0, a
-byte-for-byte snapshot of commit c09ea43).
+The v1.4.1 project is produced by running the v1.4.1 installer itself (tests/fixtures/v1_4_1, a
+byte-for-byte snapshot of commit 634a5c6).
 
     python3 -m unittest discover -s tests
 """
@@ -15,47 +15,47 @@ import unittest
 from test_migrate_v12 import LOOP_TEST, MigrationBase
 
 HERE = Path(__file__).resolve().parent
-V140_INSTALLER = HERE / "fixtures" / "v1_4_0" / "scripts" / "seed_lessons.py"
+V141_INSTALLER = HERE / "fixtures" / "v1_4_1" / "scripts" / "seed_lessons.py"
 HOOK = ".claude/hooks/session_start_lessons.py"
 
 
 class SnapshotIsGenuine(unittest.TestCase):
-    def test_the_v140_fixture_is_the_v140_release_not_an_approximation(self):
+    def test_the_v141_fixture_is_the_v141_release_not_an_approximation(self):
         for rel in ("scripts/seed_lessons.py",
                     "assets/lessons-loop/hooks/lesson_detect.py",
                     "assets/lessons-loop/hooks/session_start_lessons.py",
                     "assets/lessons-loop/tests/test_lessons_loop.py"):
-            proc = subprocess.run(["git", "show", "c09ea43:plugins/skill-improver/skills/skill-improver/" + rel],
+            proc = subprocess.run(["git", "show", "634a5c6:plugins/skill-improver/skills/skill-improver/" + rel],
                                   cwd=HERE, capture_output=True)
             if proc.returncode != 0:
-                self.skipTest("commit c09ea43 is not in this clone")
-            self.assertEqual((HERE / "fixtures/v1_4_0" / rel).read_bytes(), proc.stdout, rel)
+                self.skipTest("commit 634a5c6 is not in this clone")
+            self.assertEqual((HERE / "fixtures/v1_4_1" / rel).read_bytes(), proc.stdout, rel)
 
 
-class UpgradeFromV140(MigrationBase):
-    installer = V140_INSTALLER
+class UpgradeFromV141(MigrationBase):
+    installer = V141_INSTALLER
 
-    def test_pristine_v140_has_nothing_the_upgrade_would_keep(self):
+    def test_pristine_v141_has_nothing_the_upgrade_would_keep(self):
         self.seed_old("--seed")
         rc, out = self.run_installer("--upgrade")
         self.assertEqual(rc, 0, out)
         self.assertNotIn("KEPT AS YOU LEFT THEM", out)
         self.assertNotIn("held at its previous version", out)
 
-    def test_pristine_v140_with_jev_upgrades_and_keeps_nothing(self):
+    def test_pristine_v141_with_jev_upgrades_and_keeps_nothing(self):
         self.seed_old("--seed", "--jev-provider", "openrouter")
         rc, out = self.run_installer("--upgrade")
         self.assertEqual(rc, 0, out)
         self.assertNotIn("KEPT AS YOU LEFT THEM", out)
         self.assertNotIn("held at its previous version", out)
 
-    def test_upgrade_replaces_the_hook_that_hid_test_and_ci_homed_rules(self):
+    def test_upgrade_replaces_the_suite_that_read_its_layout_off_the_checker(self):
         self.seed_old("--seed")
-        hook = self.root / HOOK
-        self.assertIn('".github/workflows/"', hook.read_text())
+        suite = self.root / LOOP_TEST
+        self.assertIn("_lg.ARCHIVE_REL", suite.read_text())
         rc, out = self.run_installer("--upgrade")
         self.assertEqual(rc, 0, out)
-        self.assertNotIn('".github/workflows/"', hook.read_text())
+        self.assertNotIn("_lg.ARCHIVE_REL", suite.read_text())
 
     def test_upgrade_preserves_the_ledger_byte_for_byte(self):
         self.make_old_project("--seed")
@@ -63,7 +63,7 @@ class UpgradeFromV140(MigrationBase):
         self.assertEqual(rc, 0, out)
         self.assert_ledger_intact()
 
-    def test_an_edited_v140_hook_is_kept_and_the_suite_skips_its_checks(self):
+    def test_an_edited_v141_hook_is_kept_and_the_suite_skips_its_checks(self):
         self.make_old_project("--seed")
         hook, loop_test = self.root / HOOK, self.root / LOOP_TEST
         hook.write_text(hook.read_text() + "\n# MY LOCAL RULE\n")

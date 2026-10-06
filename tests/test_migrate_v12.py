@@ -333,21 +333,19 @@ class UpgradeFromV12(MigrationBase):
         implement.write_text(implement.read_text() + "\n- Learned rule: always rerun the nightly job twice.\n")
         hook.write_text(hook.read_text() + "\n# MY LOCAL TWEAK\n")
         edited = {p: p.read_bytes() for p in (implement, hook)}
-        held = loop_test.read_bytes()
         for args in (("--upgrade",), ("--upgrade", "--jev-provider", "openrouter"), ("--upgrade",)):
             rc, out = self.run_installer(*args)
             self.assertEqual(rc, 0, out)
             self.assertIn("KEPT AS YOU LEFT THEM", out)
             self.assertIn(".claude/skills/implement-ll/SKILL.md", out)
-            self.assertIn(f"{LOOP_TEST} held at its previous version because "
-                          ".claude/hooks/session_start_lessons.py carries your edits", out)
+            self.assertNotIn("held at its previous version", out)
             for path, content in edited.items():
                 self.assertEqual(path.read_bytes(), content)
-            self.assertEqual(loop_test.read_bytes(), held)
+            self.assertIn('PROJECT_OWNED = "hook implement-ll"', loop_test.read_text())
         self.assertTrue((self.root / DETECTOR).exists())
         dry = self.run_installer("--dry-run")[1]
         self.assertIn("KEEP (edited in this project)", dry)
-        self.assertIn("HELD (its partner carries your edits)", dry)
+        self.assertNotIn("HELD", dry)
 
     def test_an_amended_loop_test_holds_the_hook_at_its_previous_version(self):
         hook = self.root / ".claude/hooks/session_start_lessons.py"
@@ -515,7 +513,7 @@ class FailureCannotDamageTheLoop(MigrationBase):
 
     def test_a_failing_post_upgrade_check_rolls_the_upgrade_back(self):
         before = snapshot(self.root)
-        with mock.patch.object(S, "verify", return_value=1):
+        with mock.patch.object(S, "verify", return_value=["a forced failure"]):
             rc, out = self.run_installer("--upgrade", "--jev-provider", "openrouter", env={"OPENROUTER_API_KEY": KEY})
         self.assertNotEqual(rc, 0)
         self.assertIn("rolled back", out)

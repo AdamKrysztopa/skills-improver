@@ -6,7 +6,3 @@ other content is the project's own edit (the drain amends these very files on pu
 When a release changes a generated asset, copy the previous version here and list it under
 `legacy` in `planned_files`. `tests/test_migrate_v12.py` fails if a pristine v1.2 install still has
 a file the upgrade would keep.
-
-Comparison ignores formatting for `.py` files (same syntax tree and comments), and the installer's
-own templated `NAME = "..."` lines, so a project formatter or a changed layout does not turn a
-shipped version into a project edit.

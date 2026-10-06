@@ -212,7 +212,9 @@ Run `python3 <skill-dir>/scripts/seed_lessons.py --dry-run --root <project>` fir
 **EXISTING LOOP DETECTED**, this is an **upgrade**, not a seed: skip Step 1's three forms and ask
 only the Jev question below, then run `--upgrade` with the answer. A project seeded by v1.2 reports
 Jev as "not enabled" — that is its normal state, not a choice anyone made, so ask; do not infer
-Off and do not enable anything unasked. The upgrade refreshes the generated machinery (each
+Off and do not enable anything unasked. If the dry run exits 1 asking for `--docs-dir`, the loop's
+ledger could not be located: ask the user which directory holds the queue and the archive rather
+than picking one. The upgrade refreshes the generated machinery (each
 changed file keeps a `.bak`), adds what v1.3 needs, leaves the queue, the archive and every
 unrelated hook or setting alone, rolls itself back if its own checks fail, and is safe to repeat:
 

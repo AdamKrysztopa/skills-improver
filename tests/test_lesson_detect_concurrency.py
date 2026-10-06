@@ -49,6 +49,11 @@ class Concurrency(unittest.TestCase):
         p = mock.patch.object(D, "load_state", slow_load)
         p.start()
         self.addCleanup(p.stop)
+        # The slowed loads can outlast the real 1 s lock timeout on a loaded CI runner, dropping a call.
+        real_locked = D.locked
+        lk = mock.patch.object(D, "locked", lambda path, timeout=10.0: real_locked(path, timeout=timeout))
+        lk.start()
+        self.addCleanup(lk.stop)
 
     def fire(self, payloads, transport=None):
         outs = [None] * len(payloads)

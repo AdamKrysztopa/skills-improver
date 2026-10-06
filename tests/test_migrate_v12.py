@@ -515,7 +515,7 @@ class FailureCannotDamageTheLoop(MigrationBase):
 
     def test_a_failing_post_upgrade_check_rolls_the_upgrade_back(self):
         before = snapshot(self.root)
-        with mock.patch.object(S, "verify", return_value=1):
+        with mock.patch.object(S, "verify", return_value=["a forced failure"]):
             rc, out = self.run_installer("--upgrade", "--jev-provider", "openrouter", env={"OPENROUTER_API_KEY": KEY})
         self.assertNotEqual(rc, 0)
         self.assertIn("rolled back", out)

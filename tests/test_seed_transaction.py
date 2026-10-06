@@ -36,7 +36,7 @@ class Transaction(unittest.TestCase):
 
     def test_fresh_seed_that_fails_verification_is_rolled_back(self):
         before = tree(self.root)
-        with mock.patch.object(S, "verify", return_value=1):
+        with mock.patch.object(S, "verify", return_value=["a forced failure"]):
             rc, out = self.main("--seed")
         self.assertEqual(rc, 1)
         self.assertIn("rolled back", out)

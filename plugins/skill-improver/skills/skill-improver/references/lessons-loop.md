@@ -75,10 +75,23 @@ stored) and what Jev is doing. Then `--upgrade [--jev-provider ...]`.
 - **Layout is read back from the installed hook**, not re-guessed from the directories the project
   has grown since; an install whose hook points somewhere the installer cannot reproduce stops with
   `--docs-dir` guidance and writes nothing.
+- **A loop without the generated hook keeps its own ledger.** If the ledger is not in the default
+  docs directory, the installer looks for the one `lessons-archive.md` (any case) at the root and
+  under `docs/`, `doc/` or `documentation/`. None, or more than one, stops with exit 1 and
+  `--docs-dir` guidance: a second, empty ledger is never created. The ledger's file names are kept
+  as the filesystem spells them.
+- **A project SessionStart hook that reads the ledger is kept, not doubled.** The generated hook is
+  then neither installed nor registered.
 - **Refreshed:** only files that differ. A second run writes nothing. A `.bak` is never overwritten —
-  a later upgrade adds `.bak.1`, so a hand-edited hook stays recoverable.
+  a later upgrade adds `.bak.1`, so a hand-edited hook stays recoverable. A Python file that differs
+  from a shipped version only in formatting (same syntax tree and comments) counts as that version,
+  so a project formatter does not freeze it.
+- **The suite tests only what the plugin installed.** The checker, the hook or a skill kept as the
+  project's own is listed in the suite's `PROJECT_OWNED`, and its checks are skipped and say so. With
+  both the checker and the hook the project's own, the suite is not installed.
 - **All or nothing:** files are written through a journal; a write error, or a failure of the
-  upgraded machinery's own checks, restores every file and prints `rolled back`.
+  upgraded machinery's own checks, restores every file and prints `rolled back` with the cause.
+  Findings the checker reports in the project's real archive are shown (capped) and never fail it.
 - **Jev is a separate, explicit answer.** No flag leaves it exactly as found (`enabled (provider)`,
   `installed but not registered`, or `not enabled`); only `--jev-provider` changes it, and it never
   switches provider on its own. "Never chosen" and "chosen Off" leave identical artefacts and are

@@ -20,11 +20,8 @@ archive is the worst possible outcome of this feature.
 from __future__ import annotations
 
 import argparse
-import ast
 import functools
 import importlib.util
-import inspect
-import io
 import json
 import os
 import posixpath
@@ -33,7 +30,6 @@ import stat
 import subprocess
 import sys
 import tempfile
-import tokenize
 from pathlib import Path
 
 ASSETS = Path(__file__).resolve().parent.parent / "assets" / "lessons-loop"
@@ -41,10 +37,6 @@ ASSETS = Path(__file__).resolve().parent.parent / "assets" / "lessons-loop"
 DOC_DIR_CANDIDATES = ("docs", "doc", "documentation")
 SCRIPT_DIR_CANDIDATES = ("scripts", "bin", "tools")
 TEST_DIR_CANDIDATES = ("tests", "test")
-ARCHIVE_NAME = "LESSONS-ARCHIVE.md"
-QUEUE_NAME = "lessons.md"
-LEDGER_SEARCH_DEPTH = 3
-REPORT_LINES = 20
 
 DOCS_INDEX_CANDIDATES = (
     "docs/README.md", "docs/index.md", "docs/SUMMARY.md",
@@ -84,18 +76,15 @@ class Layout:
         self.hooks = hooks
         self.skills = skills
         self.tests = tests
-        self.archive_name = ARCHIVE_NAME
-        self.queue_name = QUEUE_NAME
         self.recovered = False
-        self.located = False
 
     @property
     def archive(self) -> str:
-        return f"{self.docs}/{self.archive_name}"
+        return f"{self.docs}/LESSONS-ARCHIVE.md"
 
     @property
     def queue(self) -> str:
-        return f"{self.docs}/{self.queue_name}"
+        return f"{self.docs}/lessons.md"
 
     @property
     def checker(self) -> str:
@@ -154,14 +143,13 @@ def recover_layout(root: Path, args) -> dict:
         return {}
     scripts, archive, queue = (consts[n].group(1) for n in ("SCRIPTS_REL", "ARCHIVE_REL", "QUEUE_REL"))
     docs = posixpath.dirname(queue)
-    archive_name, queue_name = posixpath.basename(archive), posixpath.basename(queue)
-    if not args.docs_dir and (posixpath.dirname(archive) != docs or queue_name.lower() != QUEUE_NAME.lower()
-                              or archive_name.lower() != ARCHIVE_NAME.lower()):
+    if not args.docs_dir and (posixpath.dirname(archive) != docs or posixpath.basename(queue) != "lessons.md"
+                              or posixpath.basename(archive) != "LESSONS-ARCHIVE.md"):
         raise LayoutError(
             f"the installed hook reads its queue from {queue} and its archive from {archive}, which "
             "this installer cannot reproduce. Nothing was written. Pass --docs-dir to say where "
-            f"{QUEUE_NAME} and {ARCHIVE_NAME} live, or reconcile the hook by hand.")
-    found = {"docs": docs or ".", "scripts": scripts, "archive_name": archive_name, "queue_name": queue_name}
+            "lessons.md and LESSONS-ARCHIVE.md live, or reconcile the hook by hand.")
+    found = {"docs": docs or ".", "scripts": scripts}
     for candidate in (*(f"{t}/lessons_loop" for t in TEST_DIR_CANDIDATES), f"{scripts}/lessons_loop_tests"):
         if (root / candidate / "test_lessons_loop.py").is_file():
             found["tests"] = candidate
@@ -186,70 +174,7 @@ def detect_layout(args) -> Layout:
     tests = contained(root, tests, "tests directory")
     lay = Layout(root, docs, scripts, ".claude/hooks", ".claude/skills", tests)
     lay.recovered = bool(known)
-    if root.is_dir() and not args.docs_dir and not known:
-        locate_ledger(lay)
-    if known and not args.docs_dir:
-        lay.archive_name, lay.queue_name = known["archive_name"], known["queue_name"]
-    else:
-        lay.archive_name = on_disk_name(root / lay.docs, ARCHIVE_NAME) or ARCHIVE_NAME
-        lay.queue_name = on_disk_name(root / lay.docs, QUEUE_NAME) or QUEUE_NAME
     return lay
-
-
-def on_disk_name(directory: Path, name: str) -> str | None:
-    """The entry in `directory` that is `name` up to case, spelled as the filesystem holds it.
-
-    A case-insensitive filesystem answers `exists()` for either spelling, so only the listing can
-    tell which one a second, differently-cased file would collide with on Linux.
-    """
-    try:
-        names = os.listdir(directory)
-    except OSError:
-        return None
-    if name in names:
-        return name
-    return next((n for n in sorted(names) if n.lower() == name.lower()), None)
-
-
-def find_archives(root: Path) -> list[str]:
-    """Every directory holding a lessons archive: the project root, and the doc trees below it."""
-    hits = {"."} if on_disk_name(root, ARCHIVE_NAME) else set()
-    for top in DOC_DIR_CANDIDATES:
-        base = root / top
-        if base.is_symlink() or not base.is_dir():
-            continue
-        for dirpath, dirnames, filenames in os.walk(base):
-            rel = Path(dirpath).relative_to(root).as_posix()
-            dirnames[:] = [d for d in dirnames if not d.startswith(".")] if rel.count("/") < LEDGER_SEARCH_DEPTH else []
-            if any(n.lower() == ARCHIVE_NAME.lower() for n in filenames):
-                hits.add(rel)
-    return sorted(hits)
-
-
-def locate_ledger(lay: Layout) -> None:
-    """Point `lay` at an existing loop's ledger when it is not where a fresh install would put it.
-
-    Raises:
-        LayoutError: A loop is installed but its ledger is not in exactly one place; creating an
-            empty one beside it would split the record.
-    """
-    root = lay.root
-    if on_disk_name(root / lay.docs, ARCHIVE_NAME) or on_disk_name(root / lay.docs, QUEUE_NAME):
-        return
-    present = [f["dest"] for f in planned_files(lay, False, with_jev=True)
-               if f["kind"] == "code" and (root / f["dest"]).exists()]
-    if not present:
-        return
-    found = find_archives(root)
-    if len(found) == 1:
-        lay.docs, lay.located = found[0], True
-        return
-    where = (f"{len(found)} archives were found ({', '.join(d + '/' for d in found)})" if found
-             else f"no {ARCHIVE_NAME} was found at the root or under {', '.join(d + '/' for d in DOC_DIR_CANDIDATES)}")
-    raise LayoutError(
-        f"an existing lessons loop is installed here ({present[0]}), but its ledger is not in "
-        f"{lay.docs}/ and {where}. Nothing was written, and a second ledger is never created. "
-        f"Pass --docs-dir with the directory that holds {QUEUE_NAME} and the archive.")
 
 
 # --- retargeting ------------------------------------------------------------
@@ -264,13 +189,8 @@ def retarget(text: str, lay: Layout, *, constants: dict | None = None) -> str:
     ):
         if old != new:
             text = text.replace(old, new)
-    return with_constants(text, constants)
-
-
-def with_constants(text: str, constants: dict | None) -> str:
-    """Set each installer-templated `NAME = "..."` line; the installer owns these lines, not the project."""
     for name, value in (constants or {}).items():
-        text = re.sub(rf'^{name} = ".*"$', lambda _m, n=name, v=value: f'{n} = "{v}"', text, flags=re.M)
+        text = re.sub(rf'^{name} = ".*"$', f'{name} = "{value}"', text, flags=re.M)
     return text
 
 
@@ -283,10 +203,10 @@ def planned_files(lay: Layout, empty_queue: bool, *, with_jev: bool = False) -> 
          "transform": (lambda t: strip_example(t)) if empty_queue else None},
         {"dest": lay.archive, "src": "docs/LESSONS-ARCHIVE.md", "kind": "data",
          "role": "the graph — one dated section per drain, newest first"},
-        {"dest": lay.checker, "src": "scripts/lessons_graph.py", "kind": "code", "part": "checker",
+        {"dest": lay.checker, "src": "scripts/lessons_graph.py", "kind": "code",
          "role": "the mechanical check — oscillation, recurrence, dangling edges",
          "constants": {"ARCHIVE_REL": lay.archive, "QUEUE_REL": lay.queue}},
-        {"dest": lay.hook, "src": "hooks/session_start_lessons.py", "kind": "code", "part": "hook",
+        {"dest": lay.hook, "src": "hooks/session_start_lessons.py", "kind": "code",
          "role": "the part that removes remembering",
          "legacy": ["legacy/hooks/session_start_lessons.v1.3.1.py",
                     "legacy/hooks/session_start_lessons.v1.4.0.py"],
@@ -294,31 +214,28 @@ def planned_files(lay: Layout, empty_queue: bool, *, with_jev: bool = False) -> 
          "constants": {"SCRIPTS_REL": lay.scripts, "ARCHIVE_REL": lay.archive,
                        "QUEUE_REL": lay.queue}},
         {"dest": f"{lay.skills}/lessons/SKILL.md", "src": "skills/lessons/SKILL.md",
-         "kind": "code", "part": "lessons", "role": "capture — writes one entry and stops",
+         "kind": "code", "role": "capture — writes one entry and stops",
          "legacy": ["legacy/skills/lessons/SKILL.v1.2.0.md"]},
         {"dest": f"{lay.skills}/implement-ll/SKILL.md",
-         "src": "skills/implement-ll/SKILL.md", "kind": "code", "part": "implement-ll",
+         "src": "skills/implement-ll/SKILL.md", "kind": "code",
          "role": "drain — group, route, apply, verify, archive"},
         {"dest": f"{lay.tests}/test_lessons_loop.py", "src": "tests/test_lessons_loop.py",
-         "kind": "code", "suite": True, "role": "proves the checker and hook actually fire",
+         "kind": "code", "role": "proves the checker and hook actually fire",
          "legacy": ["legacy/tests/test_lessons_loop.v1.3.1.py",
-                    "legacy/tests/test_lessons_loop.v1.4.0.py",
-                    "legacy/tests/test_lessons_loop.v1.4.1.py"],
+                    "legacy/tests/test_lessons_loop.v1.4.0.py"],
          "couples": lay.hook,
          "constants": {"ROOT_UP": tests_root_up, "CHECKER_REL": lay.checker,
                        "HOOK_REL": lay.hook, "SKILLS_REL": lay.skills,
                        "TEMPLATE_ARCHIVE_REL": f"{lay.tests}/template-archive.md",
-                       "TEMPLATE_QUEUE_REL": f"{lay.tests}/template-queue.md",
-                       "ARCHIVE_IN_PROJECT": lay.archive, "QUEUE_IN_PROJECT": lay.queue,
-                       "SCRIPTS_IN_PROJECT": lay.scripts, "PROJECT_OWNED": ""}},
+                       "TEMPLATE_QUEUE_REL": f"{lay.tests}/template-queue.md"}},
         {"dest": f"{lay.tests}/fixture-broken.md", "src": "tests/fixture-broken.md",
-         "kind": "code", "suite": True, "role": "seeded oscillation + 2x recurrence + typo edge"},
+         "kind": "code", "role": "seeded oscillation + 2x recurrence + typo edge"},
         {"dest": f"{lay.tests}/fixture-clean.md", "src": "tests/fixture-clean.md",
-         "kind": "code", "suite": True, "role": "a healthy archive the checker must stay quiet about"},
+         "kind": "code", "role": "a healthy archive the checker must stay quiet about"},
         {"dest": f"{lay.tests}/template-archive.md", "src": "docs/LESSONS-ARCHIVE.md",
-         "kind": "code", "suite": True, "role": "pristine archive — guards the fenced-example defence"},
+         "kind": "code", "role": "pristine archive — guards the fenced-example defence"},
         {"dest": f"{lay.tests}/template-queue.md", "src": "docs/lessons.md",
-         "kind": "code", "suite": True, "role": "pristine queue"},
+         "kind": "code", "role": "pristine queue"},
     ]
     if with_jev:
         files.append({"dest": lay.detector, "src": "hooks/lesson_detect.py", "kind": "code",
@@ -441,32 +358,7 @@ def check_hooks_shape(settings: object) -> None:
                 raise ValueError(f'"hooks.{event}[{i}]" is not a hook group')
 
 
-def project_lessons_hook(lay: Layout) -> str | None:
-    """A SessionStart script of the project's own that already reads this ledger, if one is registered."""
-    names = (posixpath.basename(lay.archive).lower(), posixpath.basename(lay.queue).lower())
-    for rel in (".claude/settings.json", LOCAL_SETTINGS):
-        try:
-            settings = json.loads((lay.root / rel).read_text(encoding="utf-8"))
-            check_hooks_shape(settings)
-        except (OSError, ValueError):
-            continue
-        for group in settings.get("hooks", {}).get("SessionStart", []):
-            for h in group.get("hooks", []):
-                command = str(h.get("command", ""))
-                if "session_start_lessons.py" in command:
-                    continue
-                for script in re.findall(r"[\w./-]+\.py", command):
-                    script = script.split("CLAUDE_PROJECT_DIR/", 1)[-1]
-                    try:
-                        body = (lay.root / script).read_text(encoding="utf-8", errors="replace").lower()
-                    except OSError:
-                        continue
-                    if any(name in body for name in names):
-                        return script
-    return None
-
-
-def settings_action(lay: Layout, superseded_by: str | None = None) -> tuple[str, dict]:
+def settings_action(lay: Layout) -> tuple[str, dict]:
     """Return (verdict, merged-settings) without writing anything."""
     path = lay.root / ".claude" / "settings.json"
     try:
@@ -480,8 +372,6 @@ def settings_action(lay: Layout, superseded_by: str | None = None) -> tuple[str,
         for h in group.get("hooks", []):
             if "session_start_lessons.py" in str(h.get("command", "")):
                 return ("already registered", settings)
-    if superseded_by:
-        return ("unchanged (project's own hook)", {})
     starts.append({
         "$comment": HOOK_COMMENT,
         "hooks": [{"type": "command", "command": hook_command(lay)}],
@@ -783,66 +673,9 @@ def file_state(lay: Layout, f: dict) -> str:
         found = dest.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return "customised"
-    rendered = render(lay, f)
-    if same_content(found, rendered, f["dest"]):
+    if found == render(lay, f):
         return "current"
-    pinned = with_constants(found, f.get("constants"))
-    if pinned != found and same_content(pinned, rendered, f["dest"]):
-        return "outdated"
-    if any(same_content(pinned, render(lay, f, old), f["dest"]) for old in f.get("legacy", ())):
-        return "outdated"
-    return "customised"
-
-
-def same_content(found: str, shipped: str, dest: str) -> bool:
-    """Byte-equal, or for Python equal after formatting: a project formatter is not a project edit."""
-    if found == shipped:
-        return True
-    if not dest.endswith(".py"):
-        return False
-    fingerprint = code_fingerprint(found)
-    return fingerprint is not None and fingerprint == code_fingerprint(shipped)
-
-
-def code_fingerprint(text: str) -> tuple[str, list[str]] | None:
-    """The syntax tree and the comment text: what a formatter such as ruff or black leaves alone.
-
-    Docstrings are compared after cleandoc, since formatters re-indent them and move closing quotes.
-    """
-    try:
-        tree = ast.parse(text)
-        comments = [tok.string.lstrip("#").strip()
-                    for tok in tokenize.generate_tokens(io.StringIO(text).readline)
-                    if tok.type == tokenize.COMMENT]
-    except (SyntaxError, ValueError, tokenize.TokenError):
-        return None
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and node.body:
-            first = node.body[0]
-            if (isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)
-                    and isinstance(first.value.value, str)):
-                first.value.value = inspect.cleandoc(first.value.value).strip()
-    return ast.dump(tree), comments
-
-
-def plan_states(lay: Layout, files: list[dict], superseded_by: str | None) -> dict[str, str]:
-    """Each destination's state, once it is known which parts the project owns and so what the suite tests.
-
-    The suite tests the shipped checker and hook; it is told which parts are the project's own so
-    it skips them rather than asserting the shipped behaviour of a file this run did not install.
-    With both the checker and the hook the project's own there is nothing of ours to test.
-    """
-    states = {f["dest"]: file_state(lay, f) for f in files if not f.get("suite")}
-    if superseded_by:
-        states[lay.hook] = "superseded"
-    owned = sorted(f["part"] for f in files if f.get("part") and states[f["dest"]] in ("customised", "superseded"))
-    needed = not {"checker", "hook"} <= set(owned)
-    for f in files:
-        if f.get("suite"):
-            if "PROJECT_OWNED" in f.get("constants", {}):
-                f["constants"]["PROJECT_OWNED"] = " ".join(owned)
-            states[f["dest"]] = file_state(lay, f) if needed else "not needed"
-    return hold_coupled(files, states)
+    return "outdated" if any(found == render(lay, f, old) for old in f.get("legacy", ())) else "customised"
 
 
 def hold_coupled(files: list[dict], states: dict[str, str]) -> dict[str, str]:
@@ -873,91 +706,57 @@ def install(lay: Layout, files: list[dict], upgrade: bool, journal: Journal,
     return written
 
 
-def print_capped(text: str, rerun: str) -> None:
-    lines = text.rstrip().splitlines()
-    print("\n".join(lines[:REPORT_LINES]))
-    if len(lines) > REPORT_LINES:
-        print(f"… {len(lines) - REPORT_LINES} more line(s); for all of them run: {rerun}")
-
-
-def verify(lay: Layout, states: dict[str, str], *, superseded_by: str | None,
-           ledger_created: bool) -> list[str]:
-    """Run the machinery and show what it prints. A hook is code, not a claim.
-
-    Returns:
-        Why the machinery failed, one line per cause; empty when it passed.
-    """
+def verify(lay: Layout) -> int:
+    """Run the machinery and show what it prints. A hook is code, not a claim."""
     root = lay.root
     env = {**os.environ, "CLAUDE_PROJECT_DIR": str(root),
            "PYTHONDONTWRITEBYTECODE": "1"}
-    causes = []
-    suite = f"{lay.tests}/test_lessons_loop.py"
+    rc = 0
 
-    if states[lay.checker] == "customised":
-        print(f"\n--- the checker, against the seeded-defect fixture: skipped — {lay.checker} is this "
-              "project's own version, and the fixture tests the shipped one ---")
-    else:
-        print("\n--- the checker, against the seeded-defect fixture "
-              "(must exit 1 and print a chain) ---")
-        proc = subprocess.run(
-            [sys.executable, str(root / lay.checker)],
-            env={**env, "LESSONS_ARCHIVE": str(root / lay.tests / "fixture-broken.md")},
-            capture_output=True, text=True)
-        print_capped(proc.stdout or proc.stderr, f"python3 {lay.checker}")
-        print(f"[exit {proc.returncode}]")
-        if proc.returncode != 1:
-            print("!! the checker did not fire on a deliberately broken archive")
-            causes.append(f"{lay.checker} exited {proc.returncode} on the seeded-defect fixture, not 1")
+    print("\n--- the checker, against the seeded-defect fixture "
+          "(must exit 1 and print a chain) ---")
+    proc = subprocess.run(
+        [sys.executable, str(root / lay.checker)],
+        env={**env, "LESSONS_ARCHIVE": str(root / lay.tests / "fixture-broken.md")},
+        capture_output=True, text=True)
+    print(proc.stdout.rstrip() or proc.stderr.rstrip())
+    print(f"[exit {proc.returncode}]")
+    if proc.returncode != 1:
+        print("!! the checker did not fire on a deliberately broken archive")
+        rc = 1
 
     print("\n--- the checker, against this project's real archive ---")
     proc = subprocess.run([sys.executable, str(root / lay.checker)],
                           env=env, capture_output=True, text=True)
-    print_capped(proc.stdout or proc.stderr, f"python3 {lay.checker}")
-    print(f"[exit {proc.returncode}]" + (" — findings in this project's archive are the next drain's work, "
-                                         "not an install failure" if proc.returncode == 1 else ""))
+    print(proc.stdout.rstrip() or proc.stderr.rstrip())
+    print(f"[exit {proc.returncode}]")
 
-    if superseded_by:
-        print(f"\n--- the SessionStart hook: {superseded_by} is this project's own and already injects "
-              "the ledger; not run here ---")
+    print("\n--- the SessionStart hook, triggered (this is what lands in every session) ---")
+    proc = subprocess.run([sys.executable, str(root / lay.hook)],
+                          env=env, capture_output=True, text=True, cwd=str(root))
+    if proc.returncode != 0:
+        print(f"!! hook exited {proc.returncode}; it must always exit 0")
+        rc = 1
+    if not proc.stdout.strip():
+        print("(no output — the ledger is empty, which is correct for a fresh install)")
     else:
-        print("\n--- the SessionStart hook, triggered (this is what lands in every session) ---")
-        proc = subprocess.run([sys.executable, str(root / lay.hook)],
-                              env=env, capture_output=True, text=True, cwd=str(root))
-        if proc.returncode != 0:
-            print(f"!! hook exited {proc.returncode}; it must always exit 0")
-            causes.append(f"{lay.hook} exited {proc.returncode}; a SessionStart hook must always exit 0")
-        if not proc.stdout.strip():
-            print("(no output — the ledger is empty, which is correct for a fresh install)" if ledger_created
-                  else f"(no output — the hook found no applied rule in {lay.archive} and nothing queued "
-                       f"in {lay.queue})")
-        else:
-            try:
-                ctx = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
-                print(ctx)
-            except (json.JSONDecodeError, KeyError) as exc:
-                print(f"!! hook emitted something that is not SessionStart context: {exc}")
-                print(proc.stdout)
-                causes.append(f"{lay.hook} printed something that is not SessionStart context ({exc})")
+        try:
+            ctx = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+            print(ctx)
+        except (json.JSONDecodeError, KeyError) as exc:
+            print(f"!! hook emitted something that is not SessionStart context: {exc}")
+            print(proc.stdout)
+            rc = 1
 
-    if states[suite] == "not needed":
-        print("\n--- the loop's own test suite: not installed — the checker and the SessionStart hook "
-              "it tests are both this project's own ---")
-        return causes
     print("\n--- the loop's own test suite ---")
-    proc = subprocess.run([sys.executable, str(root / suite)],
+    proc = subprocess.run([sys.executable, str(root / lay.tests / "test_lessons_loop.py")],
                           env=env, capture_output=True, text=True)
     tail = proc.stdout.rstrip().splitlines()
     print("\n".join(tail[-3:]) if tail else proc.stderr.rstrip())
     if proc.returncode != 0:
-        failed = [line.strip()[len("FAIL"):].strip().split("  ")[0]
-                  for line in tail if line.strip().startswith("FAIL ")]
-        print("\n".join(f"  FAIL {name}" for name in failed))
-        if failed:
-            causes.append(f"{suite} failed {len(failed)} check(s): {'; '.join(failed)}")
-        else:
-            crash = (proc.stderr.strip().splitlines() or [f"exit {proc.returncode}"])[-1]
-            causes.append(f"{suite} crashed before reporting: {crash}")
-    return causes
+        print("\n".join(l for l in tail if l.strip().startswith("FAIL")))
+        rc = 1
+    return rc
 
 
 # --- main -------------------------------------------------------------------
@@ -1007,16 +806,14 @@ def main(argv: list[str]) -> int:
     present = [f for f in files if (lay.root / f["dest"]).exists()]
     installed_already = any(f["kind"] == "code" for f in present)
 
-    superseded_by = None if registered(lay) else project_lessons_hook(lay)
-    states = plan_states(lay, files, superseded_by)
+    states = hold_coupled(files, {f["dest"]: file_state(lay, f) for f in files})
     outdated = [d for d, st in states.items() if st == "outdated"]
     customised = [d for d, st in states.items() if st == "customised"]
     held = {f["dest"]: f["couples"] for f in files if states[f["dest"]] == "held"}
     print(f"project root : {lay.root}")
     print(f"layout       : docs={lay.docs}/  scripts={lay.scripts}/  "
           f"hooks={lay.hooks}/  skills={lay.skills}/  tests={lay.tests}/"
-          + ("   (read from the installed hook)" if lay.recovered else "")
-          + (f"   (ledger found in {lay.docs}/)" if lay.located else ""))
+          + ("   (read from the installed hook)" if lay.recovered else ""))
     if installed_already:
         print(f"\nEXISTING LOOP DETECTED — {len(outdated)} generated file(s) are an older shipped version, "
               f"{len(customised)} carry your own edits.")
@@ -1037,24 +834,15 @@ def main(argv: list[str]) -> int:
             verdict = "KEEP (edited in this project)"
         elif state == "held":
             verdict = "HELD (its partner carries your edits)"
-        elif state == "superseded":
-            verdict = "SKIP (project has its own hook)"
-        elif state == "not needed":
-            verdict = "SKIP (nothing of ours to test)"
         elif args.upgrade:
             verdict = "upgrade (.bak kept)"
         else:
             verdict = "older version — needs --upgrade"
         print(f"  {verdict:34} {f['dest']}")
-        print(f"  {'':34} └─ " + (f"{superseded_by} already injects the ledger; no second hook is added"
-                                       if state == "superseded" else f["role"]))
-    verdict, merged = settings_action(lay, superseded_by)
+        print(f"  {'':34} └─ {f['role']}")
+    verdict, merged = settings_action(lay)
     print(f"  {verdict:34} {lay.hooks.rsplit('/', 1)[0]}/settings.json")
-    print(f"  {'':34} └─ " + (f"SessionStart already runs {superseded_by}" if superseded_by
-                               else hook_command(lay)))
-    also = project_lessons_hook(lay) if not superseded_by and verdict == "already registered" else None
-    if also:
-        print(f"  !! {also} also injects the ledger at SessionStart, beside {lay.hook} — unregister one of them")
+    print(f"  {'':34} └─ {hook_command(lay)}")
     if provider:
         jev_verdict, jev_merged = jev_settings_action(lay, provider)
         print(f"  {jev_verdict:34} {LOCAL_SETTINGS}")
@@ -1101,20 +889,16 @@ def main(argv: list[str]) -> int:
         print(f"\n!! write failed ({exc}) — rolled back: every file is as it was before this run.")
         return 1
 
-    causes = verify(lay, states, superseded_by=superseded_by,
-                    ledger_created=all(states[f["dest"]] == "create" for f in files if f["kind"] == "data"))
-    if causes:
+    rc = verify(lay)
+    if rc:
         journal.rollback()
         if args.upgrade:
-            print("\n!! the upgraded machinery failed its own checks — rolled back: every file is "
+            print("\n!! the upgraded machinery failed its own checks (above) — rolled back: every file is "
                   "as it was before this run, and the previous loop is still in place.")
         else:
-            print("\n!! the new machinery failed its own checks — rolled back: nothing this run "
+            print("\n!! the new machinery failed its own checks (above) — rolled back: nothing this run "
                   "created is left behind.")
-        print("Cause:")
-        for cause in causes:
-            print(f"  - {cause}")
-        return 1
+        return rc
     if provider:
         report_jev(lay, provider, jev_verdict, dry_run=False)
     elif installed_already:
@@ -1136,7 +920,7 @@ NEXT — populate the queue from this session
   `Candidate home` (a suggestion, not a decision). Do not implement any of them:
   routing happens at the drain, where they can be grouped.""")
 
-    if not registered(lay) and not superseded_by:
+    if not registered(lay):
         print(f"""
 INSTALLED, NOT WIRED — Claude Code will not run the loop until .claude/settings.json registers:
   {hook_command(lay)}
